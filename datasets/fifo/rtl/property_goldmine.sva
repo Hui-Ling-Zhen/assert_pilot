@@ -1,0 +1,38 @@
+module simple_fifo_assertions (
+    input wire clk,
+    input wire rst,
+    input wire wr_en,
+    input wire rd_en,
+    input wire [7:0] wdata,
+    input wire [7:0] rdata,
+    input wire full,
+    input wire empty,
+    input wire [2:0] count
+);
+
+property reset_empty;
+    @(posedge clk) rst |=> (count == 3'd0 && empty && !full);
+endproperty
+assert_reset_empty: assert property(reset_empty);
+
+property full_matches_count;
+    @(posedge clk) disable iff (rst) full == (count == 3'd4);
+endproperty
+assert_full_matches_count: assert property(full_matches_count);
+
+property empty_matches_count;
+    @(posedge clk) disable iff (rst) empty == (count == 3'd0);
+endproperty
+assert_empty_matches_count: assert property(empty_matches_count);
+
+property no_overflow;
+    @(posedge clk) disable iff (rst) (full && wr_en && !rd_en) |=> (count == $past(count));
+endproperty
+assert_no_overflow: assert property(no_overflow);
+
+property no_underflow;
+    @(posedge clk) disable iff (rst) (empty && rd_en && !wr_en) |=> (count == $past(count));
+endproperty
+assert_no_underflow: assert property(no_underflow);
+
+endmodule

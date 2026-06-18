@@ -249,6 +249,15 @@ if task == 'gen_plan':
         # generate_SVAs = True
         generate_SVAs = False
 
+        verification_backend = "jasper"  # "jasper" | "verilator" | "both"
+
+        verilator_bin = "/Users/huilingzhen/Desktop/0002-personal-projects/verification/SVA-checker/verilator/install/bin/verilator"
+        verilator_top_module = None
+        verilator_testbench_path = None
+        verilator_build_dir = "verilator_build"
+        verilator_timeout_sec = 300
+        verilator_extra_args = ["--assert", "--trace"]
+
     elif subtask == 'parse_result':
 
         load_dir = f'/<path>/<to>/src/logs/'

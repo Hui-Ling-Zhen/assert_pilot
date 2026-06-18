@@ -1,13 +1,32 @@
-# AssertionForge
+# AssertPilot
 
-AssertionForge is a research prototype for **generating high‑quality SystemVerilog Assertions (SVAs)** from natural‑language specifications and RTL.  It constructs a joint knowledge graph that bridges the semantic gap between spec and implementation, then leverages LLMs to produce a focused test plan and candidate SVAs.
+AssertPilot is a research prototype for **generating high-quality SystemVerilog Assertions (SVAs)** from natural-language specifications and RTL. It constructs a joint knowledge graph that bridges the semantic gap between specification and implementation, then leverages LLMs to produce a focused test plan and candidate SVAs.
+
+AssertPilot extends the original AssertionForge flow with a dual-backend verification model:
+
+- **Formal backend**: uses Cadence JasperGold to prove and cover generated SVAs.
+- **Simulation backend**: uses Verilator to check generated SVAs during simulation-driven validation.
 
 ## Project Overview
 
-AssertionForge enhances formal verification assertion generation with structured representation of specifications and RTL. The project follows a two-stage workflow:
+AssertPilot enhances hardware verification assertion generation with structured representation of specifications and RTL. The project follows a three-stage workflow:
 
 1. **Knowledge Graph Construction (Indexing)**
 2. **Test Plan and SVA Generation**
+3. **Verification Backend Execution**
+
+The generated SVAs depend on the natural-language test plans produced in Stage 2. The test plans act as an intermediate representation between specification/RTL context and concrete SVA code.
+
+## Verification Backends
+
+AssertPilot supports two complementary verification backends:
+
+| Backend | Tool | Purpose | Result Meaning |
+|---------|------|---------|----------------|
+| Formal | JasperGold | Prove generated SVAs over the design state space | `proven`, `covered`, or counterexample |
+| Simulation-driven | Verilator | Check generated SVAs over user-provided simulation traces/stimuli | assertion pass/fail for the exercised tests |
+
+The JasperGold backend preserves the original formal-verification flow from AssertionForge. The Verilator backend provides an open-source simulation-driven flow for designs where a testbench or stimulus source is available. A Verilator pass means no assertion failed in the executed simulation; it is not equivalent to a formal proof.
 
 ## Setup and Usage
 
@@ -17,9 +36,53 @@ Before running any command, always activate the virtual environment:
 cd /<path>/<to>/src && conda activate fv
 ```
 
+## Runnable Scripts
+
+AssertPilot includes runnable scripts under `scripts/` for local smoke testing.
+
+### Dataset Verilator Smoke Tests
+
+Use `scripts/run_dataset_verilator.py` to run the bundled `datasets/` examples with the Verilator simulation backend. The script supports both front-end lint checks and full simulation checks. Correct RTL variants are expected to pass; buggy RTL variants are expected to fail at least one assertion.
+
+Run Verilator lint for all dataset cases:
+
+```bash
+cd /path/to/AssertPilot
+./scripts/run_dataset_verilator.py --mode lint
+```
+
+Run full simulation smoke tests for all dataset cases:
+
+```bash
+cd /path/to/AssertPilot
+./scripts/run_dataset_verilator.py --mode simulate
+```
+
+Run one case or one variant:
+
+```bash
+./scripts/run_dataset_verilator.py --mode simulate --case counter
+./scripts/run_dataset_verilator.py --mode simulate --case fifo --variant correct
+./scripts/run_dataset_verilator.py --mode simulate --case fifo --variant buggy
+```
+
+Useful options:
+
+```bash
+./scripts/run_dataset_verilator.py --help
+./scripts/run_dataset_verilator.py --mode simulate --verbose
+./scripts/run_dataset_verilator.py --mode simulate --build-root /tmp/assertpilot-verilator
+```
+
+By default, the script uses the local Verilator installed at:
+
+```text
+../verilator/install/bin/verilator
+```
+
 ## Working with a New Design
 
-For a new design, you'll need to set specific parameters in config.py for both stages. Here's what you need to modify:
+For a new design, you'll need to set specific parameters in config.py for the KG, generation, and verification stages. Here's what you need to modify:
 
 ### Common Parameters for New Designs
 
@@ -83,11 +146,49 @@ For a new design, you'll need to set specific parameters in config.py for both s
      use_KG = True
      prompt_builder = "dynamic"
      ```
+   - Select the verification backend:
+     ```python
+     verification_backend = "jasper"      # "jasper", "verilator", or "both"
+     ```
 
 2. Run the test plan generation:
    ```bash
    python main.py
    ```
+
+## Stage 3: Verification Backend Execution
+
+When `generate_SVAs = True`, AssertPilot writes generated assertions to SVA files and can dispatch them to one or both verification backends.
+
+### JasperGold Formal Backend
+
+Use this backend when the goal is formal assertion verification.
+
+```python
+verification_backend = "jasper"
+```
+
+The JasperGold flow generates TCL scripts, runs formal proof, and reports whether each generated assertion is proven, covered, or has a counterexample.
+
+### Verilator Simulation Backend
+
+Use this backend when the goal is open-source simulation-driven assertion checking.
+
+```python
+verification_backend = "verilator"
+verilator_bin = "verilator"
+verilator_top_module = "your_top_module"
+verilator_testbench_path = "/path/to/your/testbench.cpp"
+verilator_extra_args = ["--assert", "--trace"]
+```
+
+The Verilator flow compiles RTL, generated SVAs, bindings or wrappers, and the user-provided testbench. It reports compile status, simulation status, and assertion failures observed during simulation.
+
+To run both backends:
+
+```python
+verification_backend = "both"
+```
 
 ## Parameter Details for New Designs
 
@@ -109,6 +210,8 @@ For a new design, you'll need to set specific parameters in config.py for both s
 | `max_num_signals_process` | Limit number of signals to process | `float('inf')` |
 | `max_prompts_per_signal` | Number of prompts per signal | `3` |
 | `generate_SVAs` | Whether to generate SVA code | `False` |
+| `verification_backend` | Verification backend to run | `"jasper"` |
+| `verilator_testbench_path` | Verilator testbench path for simulation-driven checking | `None` |
 
 ## Important Notes
 
@@ -117,6 +220,8 @@ For a new design, you'll need to set specific parameters in config.py for both s
 - For new designs, keep `generate_SVAs = False` since TCL files might not be provided.
 - Always specify `valid_signals` with the actual architectural signals from your design.
 - Architectural signals are typically input/output ports and architectural-level registers mentioned in the specification.
+- JasperGold results are formal verification results. Verilator results are simulation-driven results and depend on the provided testbench and stimuli.
+- Verilator is an open-source backend for assertion checking during simulation, but it is not a drop-in replacement for JasperGold formal proof.
 
 ## Example Workflow for a New Design
 
@@ -134,7 +239,7 @@ python main.py
 python main.py
 ```
 
-This is the recommended workflow for reliable operation of AssertionForge with new designs.
+This is the recommended workflow for reliable operation of AssertPilot with new designs.
 
 
 ## Knowledge Graph Example
@@ -147,7 +252,7 @@ This is the recommended workflow for reliable operation of AssertionForge with n
 
 ## Citation
 
-If you build on AssertionForge, please cite our LAD 2025 paper:
+AssertPilot builds on the AssertionForge research prototype. If you build on the original AssertionForge methodology, please cite the LAD 2025 paper:
 
 ```
 @inproceedings{bai2025assertionforge,

@@ -1,0 +1,6 @@
+{
+  "design": "counter",
+  "valid_signals": ["clk", "rst", "en", "count", "wrap"],
+  "top_module": "counter",
+  "buggy_top_module": "counter_buggy"
+}

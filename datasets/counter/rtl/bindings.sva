@@ -1,0 +1,15 @@
+bind counter counter_assertions i_counter_assertions (
+    .clk(clk),
+    .rst(rst),
+    .en(en),
+    .count(count),
+    .wrap(wrap)
+);
+
+bind counter_buggy counter_assertions i_counter_buggy_assertions (
+    .clk(clk),
+    .rst(rst),
+    .en(en),
+    .count(count),
+    .wrap(wrap)
+);

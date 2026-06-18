@@ -1,0 +1,15 @@
+bind rr_arbiter rr_arbiter_assertions i_rr_arbiter_assertions (
+    .clk(clk),
+    .rst(rst),
+    .req(req),
+    .grant(grant),
+    .last_grant(last_grant)
+);
+
+bind rr_arbiter_buggy rr_arbiter_assertions i_rr_arbiter_buggy_assertions (
+    .clk(clk),
+    .rst(rst),
+    .req(req),
+    .grant(grant),
+    .last_grant(last_grant)
+);

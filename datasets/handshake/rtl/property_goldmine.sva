@@ -1,0 +1,32 @@
+module handshake_stage_assertions (
+    input wire clk,
+    input wire rst,
+    input wire valid_i,
+    input wire ready_i,
+    input wire [7:0] data_i,
+    input wire ready_o,
+    input wire valid_o,
+    input wire [7:0] data_o
+);
+
+property reset_clears_valid;
+    @(posedge clk) rst |=> (!valid_o && data_o == 8'd0);
+endproperty
+assert_reset_clears_valid: assert property(reset_clears_valid);
+
+property ready_definition;
+    @(posedge clk) disable iff (rst) ready_o == (!valid_o || ready_i);
+endproperty
+assert_ready_definition: assert property(ready_definition);
+
+property accepted_input_reaches_output;
+    @(posedge clk) disable iff (rst) (valid_i && ready_o) |=> (valid_o && data_o == $past(data_i));
+endproperty
+assert_accepted_input_reaches_output: assert property(accepted_input_reaches_output);
+
+property hold_when_stalled;
+    @(posedge clk) disable iff (rst) (valid_o && !ready_i) |=> (valid_o && data_o == $past(data_o));
+endproperty
+assert_hold_when_stalled: assert property(hold_when_stalled);
+
+endmodule

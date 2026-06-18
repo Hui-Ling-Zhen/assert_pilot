@@ -1,0 +1,29 @@
+module rr_arbiter_assertions (
+    input wire clk,
+    input wire rst,
+    input wire [1:0] req,
+    input wire [1:0] grant,
+    input wire last_grant
+);
+
+property reset_clears_grant;
+    @(posedge clk) rst |=> (grant == 2'b00);
+endproperty
+assert_reset_clears_grant: assert property(reset_clears_grant);
+
+property grants_are_onehot_or_zero;
+    @(posedge clk) disable iff (rst) $onehot0(grant);
+endproperty
+assert_grants_are_onehot_or_zero: assert property(grants_are_onehot_or_zero);
+
+property grant_requires_request;
+    @(posedge clk) disable iff (rst) (grant & ~$past(req)) == 2'b00;
+endproperty
+assert_grant_requires_request: assert property(grant_requires_request);
+
+property both_requests_get_one_grant;
+    @(posedge clk) disable iff (rst) (req == 2'b11) |=> $onehot(grant);
+endproperty
+assert_both_requests_get_one_grant: assert property(both_requests_get_one_grant);
+
+endmodule

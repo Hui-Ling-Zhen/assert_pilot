@@ -1,0 +1,23 @@
+bind simple_fifo simple_fifo_assertions i_simple_fifo_assertions (
+    .clk(clk),
+    .rst(rst),
+    .wr_en(wr_en),
+    .rd_en(rd_en),
+    .wdata(wdata),
+    .rdata(rdata),
+    .full(full),
+    .empty(empty),
+    .count(count)
+);
+
+bind simple_fifo_buggy simple_fifo_assertions i_simple_fifo_buggy_assertions (
+    .clk(clk),
+    .rst(rst),
+    .wr_en(wr_en),
+    .rd_en(rd_en),
+    .wdata(wdata),
+    .rdata(rdata),
+    .full(full),
+    .empty(empty),
+    .count(count)
+);

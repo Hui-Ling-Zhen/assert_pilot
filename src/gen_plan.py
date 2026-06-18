@@ -11,6 +11,7 @@ from doc_KG_processor import create_context_generators
 from dynamic_prompt_builder import DynamicPromptBuilder
 from load_result import load_svas, load_nl_plans, load_jasper_reports, load_pdf_stats
 from rtl_parsing import refine_kg_from_rtl
+from verilator_backend import run_verilator_flow
 from utils_gen_plan import (
     extract_proof_status,
     analyze_coverage_of_proven_svas,
@@ -41,7 +42,7 @@ print = saver.log_info
 def gen_plan():
     """
     Main function to generate test plans and SVAs from a design specification,
-    and run JasperGold for verification.
+    and run the configured verification backend(s).
     """
     timer = OurTimer()
 
@@ -170,20 +171,21 @@ def gen_plan():
             sva_file_paths, _ = write_svas_to_file(svas)
             timer.time_and_clear("Write SVAs to files")
 
-            print("Step 8: Generating TCL scripts...")
-            tcl_file_paths = generate_tcl_scripts(sva_file_paths)
-            timer.time_and_clear("Generate TCL scripts")
+            print("Step 8: Running verification backend(s)...")
+            backend_results = run_verification_backends(svas, sva_file_paths)
+            jasper_reports = backend_results.get("jasper_reports", [])
+            coverage_report = backend_results.get("coverage_report", "")
+            timer.time_and_clear("Run verification backend(s)")
 
-            print("Step 9: Running JasperGold...")
-            jasper_reports = run_jaspergold(tcl_file_paths)
-            timer.time_and_clear("Run JasperGold")
-
-            print("Step 10: Analyzing coverage of proven SVAs...")
-            coverage_report = analyze_coverage_of_proven_svas(svas, jasper_reports)
-            timer.time_and_clear("Analyze coverage of proven SVAs")
-
-            print("Step 11: Analyzing and printing results...")
-            analyze_results(pdf_stats, nl_plans, svas, jasper_reports, coverage_report)
+            print("Step 9: Analyzing and printing results...")
+            analyze_results(
+                pdf_stats,
+                nl_plans,
+                svas,
+                jasper_reports,
+                coverage_report,
+                backend_results,
+            )
             timer.time_and_clear("Analyze results")
 
             print('Test plan generation and coverage evaluation process completed.')
@@ -1092,12 +1094,71 @@ def run_jaspergold(tcl_file_paths: List[str]) -> List[str]:
     return jasper_reports
 
 
+def run_jasper_flow(svas: List[str], sva_file_paths: List[str]) -> Dict:
+    """
+    Preserve the original JasperGold flow behind a backend wrapper.
+    """
+    print("JasperGold backend: generating TCL scripts...")
+    tcl_file_paths = generate_tcl_scripts(sva_file_paths)
+
+    print("JasperGold backend: running formal verification...")
+    jasper_reports = run_jaspergold(tcl_file_paths)
+
+    print("JasperGold backend: analyzing coverage of proven SVAs...")
+    coverage_report = analyze_coverage_of_proven_svas(svas, jasper_reports)
+
+    return {
+        "tcl_file_paths": tcl_file_paths,
+        "jasper_reports": jasper_reports,
+        "coverage_report": coverage_report,
+    }
+
+
+def run_verification_backends(svas: List[str], sva_file_paths: List[str]) -> Dict:
+    """
+    Dispatch generated SVAs to the configured verification backend(s).
+    """
+    backend = getattr(FLAGS, "verification_backend", "jasper")
+    valid_backends = {"jasper", "verilator", "both"}
+    if backend not in valid_backends:
+        raise ValueError(
+            f"Unsupported verification_backend='{backend}'. "
+            f"Use one of {sorted(valid_backends)}."
+        )
+
+    results = {
+        "verification_backend": backend,
+        "jasper": None,
+        "verilator": None,
+        "jasper_reports": [],
+        "coverage_report": "",
+    }
+
+    if backend in ["jasper", "both"]:
+        jasper_result = run_jasper_flow(svas, sva_file_paths)
+        results["jasper"] = jasper_result
+        results["jasper_reports"] = jasper_result["jasper_reports"]
+        results["coverage_report"] = jasper_result["coverage_report"]
+
+    if backend in ["verilator", "both"]:
+        verilator_result = run_verilator_flow(
+            sva_file_paths=sva_file_paths,
+            design_dir=FLAGS.design_dir,
+            testbench_path=getattr(FLAGS, "verilator_testbench_path", None),
+            top_module=getattr(FLAGS, "verilator_top_module", None),
+        )
+        results["verilator"] = verilator_result
+
+    return results
+
+
 def analyze_results(
     pdf_stats: dict,
     nl_plans: Dict[str, List[str]],
     svas: List[str],
     jasper_reports: List[str],
     coverage_report: str,
+    backend_results: Optional[Dict] = None,
 ):
     """
     Analyze and print statistics about the generated plans, SVAs, JasperGold results, and coverage report.
@@ -1109,8 +1170,8 @@ def analyze_results(
         jasper_reports (List[str]): List of paths to JasperGold report files.
         coverage_report (str): Coverage report from JasperGold.
     """
-    # Generate and print the detailed SVA report
-    detailed_report_path = generate_detailed_sva_report(svas, jasper_reports)
+    backend_results = backend_results or {}
+    detailed_report_path = None
 
     # General statistics
     print("\nGeneral Statistics:")
@@ -1142,30 +1203,51 @@ def analyze_results(
     avg_sva_length = sum(len(sva.split()) for sva in svas) / len(svas) if svas else 0
     print(f"  Average SVA length: {avg_sva_length:.2f} words")
 
-    print("\nJasperGold Results Summary:")
-    with open(detailed_report_path, 'r') as f:
-        df = pd.read_csv(f)
+    if jasper_reports:
+        detailed_report_path = generate_detailed_sva_report(svas, jasper_reports)
 
-    proven_count = sum(df['Proof Status'] == 'proven')
-    cex_count = sum(df['Proof Status'] == 'cex')
-    inconclusive_count = sum(df['Proof Status'] == 'inconclusive')
-    error_count = sum(df['Proof Status'] == 'error')
-    syntax_correct_count = len(svas) - error_count
+        print("\nJasperGold Results Summary:")
+        with open(detailed_report_path, 'r') as f:
+            df = pd.read_csv(f)
 
-    print(f"  Total SVAs evaluated: {len(jasper_reports)}")
-    print(f"  Proven: {proven_count}")
-    print(f"  Counterexample found: {cex_count}")
-    print(f"  Inconclusive: {inconclusive_count}")
-    print(f"  Errors: {error_count}")
-    print(f"  Syntax-correct SVAs: {syntax_correct_count}")
+        proven_count = sum(df['Proof Status'] == 'proven')
+        cex_count = sum(df['Proof Status'] == 'cex')
+        inconclusive_count = sum(df['Proof Status'] == 'inconclusive')
+        error_count = sum(df['Proof Status'] == 'error')
+        syntax_correct_count = len(svas) - error_count
 
-    success_rate = proven_count / len(jasper_reports) if jasper_reports else 0
-    print(f"  Success rate: {success_rate:.2%}")
+        print(f"  Total SVAs evaluated: {len(jasper_reports)}")
+        print(f"  Proven: {proven_count}")
+        print(f"  Counterexample found: {cex_count}")
+        print(f"  Inconclusive: {inconclusive_count}")
+        print(f"  Errors: {error_count}")
+        print(f"  Syntax-correct SVAs: {syntax_correct_count}")
+
+        success_rate = proven_count / len(jasper_reports) if jasper_reports else 0
+        print(f"  Success rate: {success_rate:.2%}")
+    else:
+        print("\nJasperGold Results Summary:")
+        print("  JasperGold backend was not run.")
+        proven_count = 0
+        syntax_correct_count = 0
 
     print("\nDetailed results saved in:")
     print(f"  SVA files: {os.path.join(saver.logdir, 'tbs')}")
-    print(f"  Jasper reports: {os.path.join(saver.logdir, 'jasper_reports')}")
-    print(f"  Detailed SVA report: {detailed_report_path}")
+    if jasper_reports:
+        print(f"  Jasper reports: {os.path.join(saver.logdir, 'jasper_reports')}")
+        print(f"  Detailed SVA report: {detailed_report_path}")
+
+    verilator_result = backend_results.get("verilator")
+    if verilator_result:
+        print("\nVerilator Results Summary:")
+        print(f"  Backend status: {verilator_result.get('status')}")
+        print(f"  Compile status: {verilator_result.get('compile_status')}")
+        print(f"  Simulation status: {verilator_result.get('simulation_status')}")
+        print(
+            f"  Assertion failures: "
+            f"{len(verilator_result.get('assertion_failures', []))}"
+        )
+        print(f"  Report: {verilator_result.get('report_json_path')}")
 
     print("\nCoverage Report:")
     # coverage_lines = coverage_report.split('\n')

@@ -1,0 +1,24 @@
+module counter_assertions (
+    input wire clk,
+    input wire rst,
+    input wire en,
+    input wire [3:0] count,
+    input wire wrap
+);
+
+property reset_clears_counter;
+    @(posedge clk) rst |=> (count == 4'd0 && wrap == 1'b0);
+endproperty
+assert_reset_clears_counter: assert property(reset_clears_counter);
+
+property hold_when_disabled;
+    @(posedge clk) disable iff (rst) (!en) |=> (count == $past(count) && wrap == 1'b0);
+endproperty
+assert_hold_when_disabled: assert property(hold_when_disabled);
+
+property wrap_at_max;
+    @(posedge clk) disable iff (rst) (en && count == 4'd15) |=> (count == 4'd0 && wrap == 1'b1);
+endproperty
+assert_wrap_at_max: assert property(wrap_at_max);
+
+endmodule

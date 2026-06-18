@@ -1,0 +1,21 @@
+bind handshake_stage handshake_stage_assertions i_handshake_stage_assertions (
+    .clk(clk),
+    .rst(rst),
+    .valid_i(valid_i),
+    .ready_i(ready_i),
+    .data_i(data_i),
+    .ready_o(ready_o),
+    .valid_o(valid_o),
+    .data_o(data_o)
+);
+
+bind handshake_stage_buggy handshake_stage_assertions i_handshake_stage_buggy_assertions (
+    .clk(clk),
+    .rst(rst),
+    .valid_i(valid_i),
+    .ready_i(ready_i),
+    .data_i(data_i),
+    .ready_o(ready_o),
+    .valid_o(valid_o),
+    .data_o(data_o)
+);

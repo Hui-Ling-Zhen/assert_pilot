@@ -1,0 +1,6 @@
+{
+  "design": "simple_fifo",
+  "valid_signals": ["clk", "rst", "wr_en", "rd_en", "wdata", "rdata", "full", "empty", "count"],
+  "top_module": "simple_fifo",
+  "buggy_top_module": "simple_fifo_buggy"
+}

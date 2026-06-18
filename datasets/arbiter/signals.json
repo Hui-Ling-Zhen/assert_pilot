@@ -1,0 +1,6 @@
+{
+  "design": "rr_arbiter",
+  "valid_signals": ["clk", "rst", "req", "grant", "last_grant"],
+  "top_module": "rr_arbiter",
+  "buggy_top_module": "rr_arbiter_buggy"
+}
