@@ -42,6 +42,7 @@ AssertPilot/
     arbiter/
   scripts/
     run_dataset_verilator.py
+    run_coverage_closure.py
 ```
 
 ## Verification Backends
@@ -69,6 +70,40 @@ Run full simulation smoke tests:
 
 ```bash
 ./scripts/run_dataset_verilator.py --mode simulate
+```
+
+Run the feedback-driven coverage closure loop:
+
+```bash
+./scripts/run_coverage_closure.py --max-iters 3
+```
+
+The closure runner currently uses tiered proxy metrics:
+
+- Required scenario coverage: default testbenches should hit the required bins.
+- Bonus scenario coverage: harder bins stay open until new stimulus is generated.
+- Mutation kill rate: each file in `rtl/mutations/` is compiled and run independently, then scored as `killed_mutations / total_mutations`.
+
+If proxy coverage is below 100%, the runner writes targeted feedback to:
+
+```text
+runs/coverage_closure/iter_<N>/targeted_feedback.json
+```
+
+An external stimulus/testbench generator can be plugged in with:
+
+```bash
+./scripts/run_coverage_closure.py \
+  --max-iters 3 \
+  --generator-command "python /path/to/update_tb.py"
+```
+
+The generator receives these environment variables:
+
+```text
+ASSERTPILOT_FEEDBACK_JSON
+ASSERTPILOT_DATASETS_DIR
+ASSERTPILOT_ITERATION
 ```
 
 Expected behavior:
@@ -99,11 +134,13 @@ case/
   spec/spec.md              # Natural-language specification
   signals.json              # Reference signal list and top-module names
   rtl/design.v              # Correct RTL
-  rtl/design_buggy.v        # Buggy RTL
+  rtl/design_buggy.v        # Compatibility buggy RTL for smoke tests
+  rtl/mutations/*.v         # Mutation set for closure quality scoring
   rtl/property_goldmine.sva # Reference assertion module / interface template
   rtl/bindings.sva          # Bind assertions to correct and buggy RTL
   rtl/FPV_<case>.tcl        # JasperGold TCL template
   sim/tb.cpp                # Verilator C++ testbench
+  coverage_scenarios.json   # Hand-written scenario coverage points
 ```
 
 Current cases:

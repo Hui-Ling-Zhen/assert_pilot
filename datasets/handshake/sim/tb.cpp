@@ -1,4 +1,5 @@
 #include "verilated.h"
+#include <iostream>
 
 #if __has_include("Vhandshake_stage_buggy.h")
 #include "Vhandshake_stage_buggy.h"
@@ -29,18 +30,26 @@ int main(int argc, char** argv) {
     top->ready_i = 1;
     top->data_i = 0;
     tick(top);
-    tick(top);
+    if (!top->valid_o && top->data_o == 0) {
+        std::cout << "SCENARIO:handshake_reset" << std::endl;
+    }
 
     top->rst = 0;
     top->valid_i = 1;
     top->ready_i = 0;
     top->data_i = 0xA5;
     tick(top);
+    if (top->valid_o && top->data_o == 0xA5) {
+        std::cout << "SCENARIO:handshake_accept_input" << std::endl;
+    }
 
     // Hold downstream not-ready long enough for the hold assertion to fire on buggy RTL.
     top->valid_i = 0;
     top->ready_i = 0;
     tick(top);
+    if (top->valid_o && top->data_o == 0xA5 && !top->ready_o) {
+        std::cout << "SCENARIO:handshake_hold_when_stalled" << std::endl;
+    }
     tick(top);
 
     top->ready_i = 1;

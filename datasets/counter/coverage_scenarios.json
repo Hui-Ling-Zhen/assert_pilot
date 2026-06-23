@@ -1,0 +1,18 @@
+{
+  "required": [
+    "counter_reset",
+    "counter_enabled_counting",
+    "counter_wrap_at_max"
+  ],
+  "bonus": [
+    "counter_disabled_hold",
+    "counter_reset_mid_count",
+    "counter_wrap_after_disable"
+  ],
+  "mutation_targets": [
+    "bug_disabled_increment",
+    "bug_reset_nonzero",
+    "bug_wrap_flag_stuck_low",
+    "bug_wrap_stuck"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "required": [
+    "handshake_reset",
+    "handshake_accept_input",
+    "handshake_hold_when_stalled"
+  ],
+  "bonus": [
+    "handshake_back_to_back",
+    "handshake_ready_toggles",
+    "handshake_stall_then_accept",
+    "handshake_data_changes_under_stall"
+  ],
+  "mutation_targets": [
+    "bug_data_changes_under_stall",
+    "bug_data_corrupt_on_accept",
+    "bug_drop_valid_when_stalled",
+    "bug_ready_stuck_low"
+  ]
+}

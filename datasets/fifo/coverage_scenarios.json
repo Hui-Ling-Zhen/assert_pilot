@@ -1,0 +1,20 @@
+{
+  "required": [
+    "fifo_reset_empty",
+    "fifo_fill_to_full",
+    "fifo_write_while_full"
+  ],
+  "bonus": [
+    "fifo_read_from_empty",
+    "fifo_simultaneous_read_write",
+    "fifo_wrap_write_pointer",
+    "fifo_wrap_read_pointer",
+    "fifo_full_then_read_then_write"
+  ],
+  "mutation_targets": [
+    "bug_bad_empty_flag",
+    "bug_bad_full_flag",
+    "bug_overflow",
+    "bug_underflow"
+  ]
+}

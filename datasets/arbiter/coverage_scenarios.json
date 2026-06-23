@@ -1,0 +1,20 @@
+{
+  "required": [
+    "arbiter_reset",
+    "arbiter_single_req0",
+    "arbiter_single_req1",
+    "arbiter_both_requests"
+  ],
+  "bonus": [
+    "arbiter_no_req_idle",
+    "arbiter_alternating_grants_with_both_req",
+    "arbiter_req0_drops_while_req1_stays",
+    "arbiter_priority_wraparound"
+  ],
+  "mutation_targets": [
+    "bug_both_requests_zero",
+    "bug_grant_without_request",
+    "bug_one_hot_grant",
+    "bug_req1_grants_req0"
+  ]
+}

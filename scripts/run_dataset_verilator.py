@@ -31,6 +31,7 @@ class Variant:
     name: str
     top_module: str
     expected: str
+    rtl_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -134,11 +135,12 @@ def select_variants(case_config: dict, variant: str) -> list[Variant]:
     return variants
 
 
-def source_files(case_dir: Path) -> list[str]:
+def source_files(case_dir: Path, variant: Variant | None = None) -> list[str]:
     rtl_dir = case_dir / "rtl"
+    buggy_rtl = Path(variant.rtl_file) if variant and variant.rtl_file else rtl_dir / "design_buggy.v"
     return [
         str(rtl_dir / "design.v"),
-        str(rtl_dir / "design_buggy.v"),
+        str(buggy_rtl),
         str(rtl_dir / "property_goldmine.sva"),
         str(rtl_dir / "bindings.sva"),
     ]
@@ -151,7 +153,7 @@ def run_lint(verilator: Path, case_dir: Path, variant: Variant) -> subprocess.Co
         "--assert",
         "--top-module",
         variant.top_module,
-        *source_files(case_dir),
+        *source_files(case_dir, variant),
     ]
     return subprocess.run(
         command,
@@ -182,7 +184,7 @@ def run_simulation(
         "--assert",
         "--top-module",
         variant.top_module,
-        *source_files(case_dir),
+        *source_files(case_dir, variant),
         str(case_dir / "sim" / "tb.cpp"),
         "-Mdir",
         str(build_dir),

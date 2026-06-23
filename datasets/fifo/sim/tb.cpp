@@ -1,4 +1,5 @@
 #include "verilated.h"
+#include <iostream>
 
 #if __has_include("Vsimple_fifo_buggy.h")
 #include "Vsimple_fifo_buggy.h"
@@ -29,7 +30,9 @@ int main(int argc, char** argv) {
     top->rd_en = 0;
     top->wdata = 0;
     tick(top);
-    tick(top);
+    if (top->empty && top->count == 0) {
+        std::cout << "SCENARIO:fifo_reset_empty" << std::endl;
+    }
 
     top->rst = 0;
     for (int i = 0; i < 4; ++i) {
@@ -37,6 +40,9 @@ int main(int argc, char** argv) {
         top->rd_en = 0;
         top->wdata = static_cast<unsigned char>(0x10 + i);
         tick(top);
+        if (top->full && top->count == 4) {
+            std::cout << "SCENARIO:fifo_fill_to_full" << std::endl;
+        }
     }
 
     // Extra write while full. Correct RTL holds count; buggy RTL overflows count.
@@ -44,6 +50,9 @@ int main(int argc, char** argv) {
     top->rd_en = 0;
     top->wdata = 0x55;
     tick(top);
+    if (top->full && top->count == 4) {
+        std::cout << "SCENARIO:fifo_write_while_full" << std::endl;
+    }
     tick(top);
 
     delete top;

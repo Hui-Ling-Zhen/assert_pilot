@@ -3,13 +3,14 @@
 This directory contains small smoke-test designs for AssertPilot. Each case is intentionally compact and includes:
 
 - Natural-language specification for KG and test-plan generation.
-- Correct RTL (`design.v`) and intentionally buggy RTL (`design_buggy.v`).
+- Correct RTL (`design.v`), a compatibility buggy RTL (`design_buggy.v`), and a mutation set under `rtl/mutations/`.
 - Reference signal list (`signals.json`).
+- Hand-written scenario coverage points (`coverage_scenarios.json`).
 - Reference SVA interface/properties (`property_goldmine.sva`) and `bindings.sva`.
 - A JasperGold TCL template (`FPV_<case>.tcl`) for the formal backend.
 - A Verilator C++ testbench (`sim/tb.cpp`) for the simulation-driven backend.
 
-The correct RTL is expected to pass the reference assertions. The buggy RTL is expected to fail at least one reference assertion under the provided Verilator testbench.
+The correct RTL is expected to pass the reference assertions. The compatibility buggy RTL is expected to fail at least one reference assertion under the provided Verilator testbench. The coverage closure runner uses the mutation set to compute `mutation_kill_rate = killed_mutations / total_mutations`.
 
 To use the Verilator backend, point `design_dir` to a case's `rtl` directory, set `verilator_testbench_path` to the case's `sim/tb.cpp`, and choose the correct top module:
 
@@ -32,10 +33,23 @@ cd /path/to/AssertPilot
 ./scripts/run_dataset_verilator.py --mode simulate
 ```
 
+Run the feedback-driven coverage closure loop:
+
+```bash
+./scripts/run_coverage_closure.py --max-iters 3
+```
+
+The closure runner uses tiered proxy coverage until a full coverage database is wired in:
+
+- required scenario coverage from `coverage_scenarios.json`
+- bonus scenario coverage from harder scenario bins
+- mutation kill rate from `rtl/mutations/*.v`
+
 Expected simulation behavior:
 
 - `correct` variants pass.
 - `buggy` variants fail one or more reference assertions.
+- mutation variants should fail when the current stimulus and assertions expose the injected bug.
 
 Run a single case:
 
