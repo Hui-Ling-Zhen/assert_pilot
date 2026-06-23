@@ -14,5 +14,16 @@
     "bug_reset_nonzero",
     "bug_wrap_flag_stuck_low",
     "bug_wrap_stuck"
+  ],
+  "assertion_triggers": {
+    "assert_reset_clears_counter": "counter_reset",
+    "assert_hold_when_disabled": "counter_disabled_hold",
+    "assert_wrap_at_max": "counter_wrap_at_max"
+  },
+  "boundary_cases": [
+    "counter_wrap_at_max",
+    "counter_disabled_hold",
+    "counter_reset_mid_count",
+    "counter_wrap_after_disable"
   ]
 }

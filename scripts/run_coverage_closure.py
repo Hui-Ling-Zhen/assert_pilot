@@ -5,10 +5,12 @@ This runner implements a practical first version of the self-improvement loop:
 
 1. Run Verilator simulations for correct RTL and each mutation RTL.
 2. Parse assertion pass/fail and hand-written scenario coverage markers.
-3. Compute tiered proxy coverage from:
-   - required scenario coverage
-   - bonus scenario coverage
-   - mutation target kill coverage
+3. Compute proxy score from separate verification-quality signals:
+   - correct RTL assertion pass
+   - mutation kill rate
+   - stimulus scenario coverage
+   - assertion activation rate approximated by trigger scenarios
+   - boundary case coverage
 4. If proxy coverage is below 100%, write targeted feedback for the next
    stimulus/testbench update iteration.
 
@@ -35,6 +37,13 @@ DEFAULT_BUILD_ROOT = PROJECT_ROOT / "runs" / "coverage_closure"
 DEFAULT_VERILATOR = (
     PROJECT_ROOT.parent / "verilator" / "install" / "bin" / "verilator"
 )
+SCORE_WEIGHTS = {
+    "correct_pass": 0.25,
+    "mutation_kill_rate": 0.25,
+    "scenario_coverage": 0.25,
+    "assertion_activation_rate": 0.15,
+    "boundary_case_coverage": 0.10,
+}
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 from run_dataset_verilator import (  # noqa: E402
@@ -51,6 +60,8 @@ class CaseRun:
     correct: dict
     buggy: dict
     scenario: dict
+    assertion: dict
+    boundary: dict
     proxy: dict
 
 
@@ -136,26 +147,67 @@ def _scenario_ids(items: list[str | dict]) -> list[str]:
     return ids
 
 
-def load_scenarios(case_dir: Path) -> dict[str, list[str]]:
+def load_scenarios(case_dir: Path) -> dict:
     scenario_path = case_dir / "coverage_scenarios.json"
     if not scenario_path.exists():
-        return {"required": [], "bonus": [], "mutation_targets": []}
+        return {
+            "required": [],
+            "bonus": [],
+            "mutation_targets": [],
+            "assertion_triggers": {},
+            "boundary_cases": [],
+        }
     data = json.loads(scenario_path.read_text(encoding="utf-8"))
     if "scenarios" in data:
         return {
             "required": _scenario_ids(data.get("scenarios", [])),
             "bonus": [],
             "mutation_targets": [],
+            "assertion_triggers": {},
+            "boundary_cases": [],
         }
     return {
         "required": _scenario_ids(data.get("required", [])),
         "bonus": _scenario_ids(data.get("bonus", [])),
         "mutation_targets": _scenario_ids(data.get("mutation_targets", [])),
+        "assertion_triggers": data.get("assertion_triggers", {}),
+        "boundary_cases": _scenario_ids(data.get("boundary_cases", [])),
     }
 
 
 def coverage_rate(observed: set[str], expected: list[str]) -> float:
     return (len(observed & set(expected)) / len(expected)) if expected else 1.0
+
+
+def trigger_ids(trigger: str | list[str] | dict) -> list[str]:
+    if isinstance(trigger, str):
+        return [trigger]
+    if isinstance(trigger, list):
+        return _scenario_ids(trigger)
+    if isinstance(trigger, dict):
+        return _scenario_ids(trigger.get("scenarios", []))
+    raise ValueError(f"Unsupported assertion trigger entry: {trigger!r}")
+
+
+def assertion_activation(assertion_triggers: dict, observed: set[str]) -> dict:
+    activated = []
+    missing = {}
+    for assertion_name, trigger in assertion_triggers.items():
+        triggers = trigger_ids(trigger)
+        observed_triggers = sorted(observed & set(triggers))
+        if observed_triggers:
+            activated.append(assertion_name)
+        else:
+            missing[assertion_name] = triggers
+
+    total = len(assertion_triggers)
+    rate = (len(activated) / total) if total else 1.0
+    return {
+        "expected": assertion_triggers,
+        "activated": sorted(activated),
+        "missing": missing,
+        "activation_rate": rate,
+    }
 
 
 def mutation_variants(
@@ -233,6 +285,8 @@ def run_case(
     required_ids = scenarios["required"]
     bonus_ids = scenarios["bonus"]
     mutation_targets = scenarios["mutation_targets"]
+    assertion_triggers = scenarios["assertion_triggers"]
+    boundary_cases = scenarios["boundary_cases"]
     scenario_ids = set(required_ids + bonus_ids)
     observed = observed_scenarios(correct_result.stdout)
 
@@ -275,17 +329,21 @@ def run_case(
     bonus_rate = coverage_rate(observed, bonus_ids)
     mutation_rate = coverage_rate(killed_mutation_targets, mutation_targets)
     scenario_rate = coverage_rate(observed, sorted(scenario_ids))
+    assertion_activation_detail = assertion_activation(assertion_triggers, observed)
+    assertion_activation_rate = assertion_activation_detail["activation_rate"]
+    boundary_case_rate = coverage_rate(observed, boundary_cases)
 
-    total_targets = len(required_ids) + len(bonus_ids) + len(mutation_targets)
-    covered_targets = (
-        len(observed & set(required_ids))
-        + len(observed & set(bonus_ids))
-        + len(killed_mutation_targets)
+    coverage_score = (
+        SCORE_WEIGHTS["correct_pass"] * (1.0 if assertion_pass else 0.0)
+        + SCORE_WEIGHTS["mutation_kill_rate"] * mutation_rate
+        + SCORE_WEIGHTS["scenario_coverage"] * scenario_rate
+        + SCORE_WEIGHTS["assertion_activation_rate"] * assertion_activation_rate
+        + SCORE_WEIGHTS["boundary_case_coverage"] * boundary_case_rate
     )
-    coverage_score = (covered_targets / total_targets) if total_targets else 1.0
 
     missing_required = sorted(set(required_ids) - observed)
     missing_bonus = sorted(set(bonus_ids) - observed)
+    missing_boundary_cases = sorted(set(boundary_cases) - observed)
     unkilled_mutation_targets = sorted(set(mutation_targets) - killed_mutation_targets)
 
     return CaseRun(
@@ -321,6 +379,15 @@ def run_case(
             "missing": missing_required + missing_bonus,
             "scenario_coverage": scenario_rate,
         },
+        assertion={
+            "activation": assertion_activation_detail,
+        },
+        boundary={
+            "expected": boundary_cases,
+            "observed": sorted(observed & set(boundary_cases)),
+            "missing": missing_boundary_cases,
+            "coverage": boundary_case_rate,
+        },
         proxy={
             "assertion_pass": 1.0 if assertion_pass else 0.0,
             "required_coverage": required_rate,
@@ -328,6 +395,10 @@ def run_case(
             "mutation_coverage": mutation_rate,
             "mutation_kill_rate": mutation_rate,
             "scenario_coverage": scenario_rate,
+            "assertion_activation_rate": assertion_activation_rate,
+            "boundary_case_coverage": boundary_case_rate,
+            "score_weights": SCORE_WEIGHTS,
+            "score": coverage_score,
             "coverage": coverage_score,
             "proxy_coverage": coverage_score,
         },
@@ -336,7 +407,22 @@ def run_case(
 
 def summarize_iteration(case_runs: list[CaseRun]) -> dict:
     if not case_runs:
-        return {"coverage": 0.0, "proxy_coverage": 0.0, "closed": False, "cases": []}
+        return {
+            "score": 0.0,
+            "score_weights": SCORE_WEIGHTS,
+            "coverage": 0.0,
+            "proxy_coverage": 0.0,
+            "assertion_pass_rate": 0.0,
+            "required_coverage": 0.0,
+            "bonus_coverage": 0.0,
+            "mutation_kill_rate": 0.0,
+            "mutation_coverage": 0.0,
+            "scenario_coverage": 0.0,
+            "assertion_activation_rate": 0.0,
+            "boundary_case_coverage": 0.0,
+            "closed": False,
+            "cases": [],
+        }
 
     avg_proxy = sum(run.proxy["proxy_coverage"] for run in case_runs) / len(case_runs)
     avg_assert = sum(run.proxy["assertion_pass"] for run in case_runs) / len(case_runs)
@@ -344,9 +430,17 @@ def summarize_iteration(case_runs: list[CaseRun]) -> dict:
     avg_scenario = sum(run.proxy["scenario_coverage"] for run in case_runs) / len(case_runs)
     avg_required = sum(run.proxy["required_coverage"] for run in case_runs) / len(case_runs)
     avg_bonus = sum(run.proxy["bonus_coverage"] for run in case_runs) / len(case_runs)
+    avg_activation = (
+        sum(run.proxy["assertion_activation_rate"] for run in case_runs) / len(case_runs)
+    )
+    avg_boundary = (
+        sum(run.proxy["boundary_case_coverage"] for run in case_runs) / len(case_runs)
+    )
     closed = avg_proxy == 1.0 and all(run.correct["assertion_pass"] for run in case_runs)
 
     return {
+        "score": avg_proxy,
+        "score_weights": SCORE_WEIGHTS,
         "coverage": avg_proxy,
         "proxy_coverage": avg_proxy,
         "assertion_pass_rate": avg_assert,
@@ -355,6 +449,8 @@ def summarize_iteration(case_runs: list[CaseRun]) -> dict:
         "mutation_kill_rate": avg_mutation,
         "mutation_coverage": avg_mutation,
         "scenario_coverage": avg_scenario,
+        "assertion_activation_rate": avg_activation,
+        "boundary_case_coverage": avg_boundary,
         "closed": closed,
         "cases": [
             {
@@ -362,6 +458,8 @@ def summarize_iteration(case_runs: list[CaseRun]) -> dict:
                 "correct": run.correct,
                 "buggy": run.buggy,
                 "scenario": run.scenario,
+                "assertion": run.assertion,
+                "boundary": run.boundary,
                 "proxy": run.proxy,
             }
             for run in case_runs
@@ -392,6 +490,14 @@ def targeted_feedback(summary: dict) -> dict:
         for missing in case["scenario"]["bonus"]["missing"]:
             case_targets.append(
                 f"Missing bonus scenario '{missing}'; add a harder stimulus phase and guard the marker with DUT state checks."
+            )
+        for assertion_name, triggers in case["assertion"]["activation"]["missing"].items():
+            case_targets.append(
+                f"Assertion '{assertion_name}' was not activated; drive one of its trigger scenarios: {', '.join(triggers)}."
+            )
+        for missing in case["boundary"]["missing"]:
+            case_targets.append(
+                f"Missing boundary case '{missing}'; add stimulus that reaches this edge condition and guard its marker with DUT state checks."
             )
         if case_targets:
             targets.append({"case": case["case"], "targets": case_targets})
@@ -454,12 +560,12 @@ def main() -> int:
             )
             case_runs.append(case_run)
             print(
-                f"{case_run.case_name}: coverage={case_run.proxy['coverage']:.2%} "
+                f"{case_run.case_name}: score={case_run.proxy['score']:.2%} "
                 f"assertion_pass={case_run.correct['assertion_pass']} "
                 f"mutations={case_run.buggy['killed_mutations']}/{case_run.buggy['total_mutations']} "
-                f"required={case_run.proxy['required_coverage']:.2%} "
-                f"bonus={case_run.proxy['bonus_coverage']:.2%} "
-                f"mutation={case_run.proxy['mutation_coverage']:.2%}"
+                f"scenario={case_run.proxy['scenario_coverage']:.2%} "
+                f"activation={case_run.proxy['assertion_activation_rate']:.2%} "
+                f"boundary={case_run.proxy['boundary_case_coverage']:.2%}"
             )
 
             if args.stop_on_compile_error and case_run.correct["returncode"] not in [0]:
@@ -469,21 +575,22 @@ def main() -> int:
         summary = summarize_iteration(case_runs)
         feedback_path = write_iteration_artifacts(args.build_root, iteration, summary)
         print(
-            f"iteration {iteration}: coverage={summary['coverage']:.2%} "
+            f"iteration {iteration}: score={summary['score']:.2%} "
             f"assertion_pass_rate={summary['assertion_pass_rate']:.2%} "
-            f"required_coverage={summary['required_coverage']:.2%} "
-            f"bonus_coverage={summary['bonus_coverage']:.2%} "
-            f"mutation_coverage={summary['mutation_coverage']:.2%}"
+            f"mutation_coverage={summary['mutation_coverage']:.2%} "
+            f"scenario_coverage={summary['scenario_coverage']:.2%} "
+            f"assertion_activation={summary['assertion_activation_rate']:.2%} "
+            f"boundary_coverage={summary['boundary_case_coverage']:.2%}"
         )
         print(f"wrote feedback: {feedback_path}")
 
         if summary["closed"]:
-            print("coverage closure reached 100% tiered coverage.")
+            print("coverage closure reached 100% weighted score.")
             return 0
 
         maybe_run_generator(args.generator_command, feedback_path, args, iteration)
 
-    print("coverage closure stopped before reaching 100% tiered coverage.")
+    print("coverage closure stopped before reaching 100% weighted score.")
     return 1
 
 

@@ -16,5 +16,19 @@
     "bug_bad_full_flag",
     "bug_overflow",
     "bug_underflow"
+  ],
+  "assertion_triggers": {
+    "assert_reset_empty": "fifo_reset_empty",
+    "assert_full_matches_count": "fifo_fill_to_full",
+    "assert_empty_matches_count": "fifo_reset_empty",
+    "assert_no_overflow": "fifo_write_while_full",
+    "assert_no_underflow": "fifo_read_from_empty"
+  },
+  "boundary_cases": [
+    "fifo_read_from_empty",
+    "fifo_write_while_full",
+    "fifo_wrap_write_pointer",
+    "fifo_wrap_read_pointer",
+    "fifo_full_then_read_then_write"
   ]
 }

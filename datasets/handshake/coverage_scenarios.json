@@ -15,5 +15,16 @@
     "bug_data_corrupt_on_accept",
     "bug_drop_valid_when_stalled",
     "bug_ready_stuck_low"
+  ],
+  "assertion_triggers": {
+    "assert_reset_clears_valid": "handshake_reset",
+    "assert_ready_definition": "handshake_ready_toggles",
+    "assert_accepted_input_reaches_output": "handshake_accept_input",
+    "assert_hold_when_stalled": "handshake_hold_when_stalled"
+  },
+  "boundary_cases": [
+    "handshake_ready_toggles",
+    "handshake_stall_then_accept",
+    "handshake_data_changes_under_stall"
   ]
 }

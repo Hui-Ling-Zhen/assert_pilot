@@ -78,11 +78,15 @@ Run the feedback-driven coverage closure loop:
 ./scripts/run_coverage_closure.py --max-iters 3
 ```
 
-The closure runner currently uses tiered proxy metrics:
+The closure runner currently separates stimulus coverage from assertion-quality signals and computes a weighted score:
 
-- Required scenario coverage: default testbenches should hit the required bins.
-- Bonus scenario coverage: harder bins stay open until new stimulus is generated.
-- Mutation kill rate: each file in `rtl/mutations/` is compiled and run independently, then scored as `killed_mutations / total_mutations`.
+- `0.25 * correct_pass`
+- `0.25 * mutation_kill_rate`
+- `0.25 * scenario_coverage`
+- `0.15 * assertion_activation_rate`
+- `0.10 * boundary_case_coverage`
+
+`scenario_coverage` comes from required and bonus `SCENARIO:<name>` markers. `assertion_activation_rate` is approximated by `coverage_scenarios.json` mappings from assertion names to trigger scenarios. `boundary_case_coverage` tracks harder edge-condition markers separately from general scenario progress. Each file in `rtl/mutations/` is compiled and run independently, then scored as `killed_mutations / total_mutations`.
 
 If proxy coverage is below 100%, the runner writes targeted feedback to:
 

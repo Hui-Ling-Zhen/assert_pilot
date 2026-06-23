@@ -39,11 +39,23 @@ Run the feedback-driven coverage closure loop:
 ./scripts/run_coverage_closure.py --max-iters 3
 ```
 
-The closure runner uses tiered proxy coverage until a full coverage database is wired in:
+The closure runner uses weighted proxy coverage until a full coverage database is wired in:
 
-- required scenario coverage from `coverage_scenarios.json`
-- bonus scenario coverage from harder scenario bins
-- mutation kill rate from `rtl/mutations/*.v`
+- `correct_pass`: correct RTL assertion pass/fail.
+- `mutation_kill_rate`: killed mutation files divided by total mutation files.
+- `scenario_coverage`: required and bonus scenario markers observed in `sim/tb.cpp`.
+- `assertion_activation_rate`: assertion-to-trigger mappings in `coverage_scenarios.json`, approximated by observed markers.
+- `boundary_case_coverage`: harder edge-condition markers listed in `coverage_scenarios.json`.
+
+The default score is:
+
+```text
+0.25 * correct_pass
++ 0.25 * mutation_kill_rate
++ 0.25 * scenario_coverage
++ 0.15 * assertion_activation_rate
++ 0.10 * boundary_case_coverage
+```
 
 Expected simulation behavior:
 

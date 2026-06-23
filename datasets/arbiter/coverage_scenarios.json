@@ -16,5 +16,18 @@
     "bug_grant_without_request",
     "bug_one_hot_grant",
     "bug_req1_grants_req0"
+  ],
+  "assertion_triggers": {
+    "assert_reset_clears_grant": "arbiter_reset",
+    "assert_grants_are_onehot_or_zero": "arbiter_both_requests",
+    "assert_grant_requires_request": "arbiter_no_req_idle",
+    "assert_both_requests_get_one_grant": "arbiter_both_requests"
+  },
+  "boundary_cases": [
+    "arbiter_no_req_idle",
+    "arbiter_both_requests",
+    "arbiter_alternating_grants_with_both_req",
+    "arbiter_req0_drops_while_req1_stays",
+    "arbiter_priority_wraparound"
   ]
 }
