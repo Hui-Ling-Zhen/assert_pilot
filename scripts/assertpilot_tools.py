@@ -28,6 +28,7 @@ DEFAULT_RUNS_DIR = PROJECT_ROOT / "runs" / "agent_tools"
 DEFAULT_VERILATOR = PROJECT_ROOT.parent / "verilator" / "install" / "bin" / "verilator"
 DEFAULT_LLM_COMMAND_ENV = "ASSERTPILOT_LLM_COMMAND"
 SVA_GENERATION_SKILL = PROJECT_ROOT / "skills" / "sva_generation_skill.md"
+DEFAULT_REPAIR_POLICY = PROJECT_ROOT / "policies" / "repair_policy.json"
 ALLOWED_REPAIR_FILES = {
     "rtl/property_goldmine.sva",
     "sim/tb.cpp",
@@ -1440,6 +1441,286 @@ def plan_repair_tool(
     return ToolResult(True, "plan_repair", output, artifacts)
 
 
+def load_repair_policy(policy_path: Path) -> dict[str, Any]:
+    if not policy_path.exists():
+        raise FileNotFoundError(f"Repair policy does not exist: {policy_path}")
+    return json.loads(policy_path.read_text(encoding="utf-8"))
+
+
+def issue_evidence_text(issue: dict[str, Any]) -> str:
+    evidence = issue.get("evidence", [])
+    if isinstance(evidence, list):
+        evidence_text = " ".join(str(item) for item in evidence)
+    else:
+        evidence_text = str(evidence)
+    return " ".join(
+        [
+            str(issue.get("target", "")),
+            str(issue.get("related_assertion", "")),
+            str(issue.get("related_scenario", "")),
+            evidence_text,
+        ]
+    ).lower()
+
+
+def repair_policy_decision_for_issue(
+    issue: dict[str, Any],
+    policy: dict[str, Any],
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = context or {}
+    issue_type = issue.get("issue_type")
+    if issue_type == "weak_assertion_or_missing_stimulus":
+        return mutation_policy_decision_for_issue(issue, policy, context)
+    if issue_type == "unreachable_or_unstimulated_assertion":
+        return activation_policy_decision_for_issue(issue, policy, context)
+    if issue_type != "false_positive_assertion":
+        return generic_policy_decision(issue)
+
+    return correct_rtl_fail_policy_decision(issue, policy)
+
+
+def correct_rtl_fail_policy_decision(issue: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    evidence_text = issue_evidence_text(issue)
+    rules = policy.get("correct_rtl_fail", {}).get("ordered_rules", [])
+    for rule in sorted(rules, key=lambda item: item.get("priority", 999)):
+        hints = [str(hint).lower() for hint in rule.get("match_hints", [])]
+        if hints and not any(hint in evidence_text for hint in hints):
+            continue
+        confidence = "medium" if hints else "low"
+        ambiguity = rule.get("id") == "spec_or_rtl_ambiguity"
+        return {
+            "policy_decision": rule.get("policy_decision"),
+            "case": issue.get("case"),
+            "issue_type": issue.get("issue_type"),
+            "target": issue.get("related_assertion") or issue.get("target"),
+            "reason": rule.get("reason"),
+            "suggested_fix": rule.get("suggested_fix"),
+            "confidence": confidence,
+            "matched_rule": rule.get("id"),
+            "spec_or_rtl_ambiguity": ambiguity,
+        }
+
+    return {
+        "policy_decision": "inspect_spec_or_rtl",
+        "case": issue.get("case"),
+        "issue_type": issue.get("issue_type"),
+        "target": issue.get("related_assertion") or issue.get("target"),
+        "reason": "correct RTL failure is not classifiable from logs alone",
+        "suggested_fix": "mark spec_or_rtl_ambiguity and do not automatically weaken the assertion",
+        "confidence": "low",
+        "matched_rule": "spec_or_rtl_ambiguity",
+        "spec_or_rtl_ambiguity": True,
+    }
+
+
+def generic_policy_decision(issue: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "policy_decision": "defer_to_repair_plan",
+        "case": issue.get("case"),
+        "issue_type": issue.get("issue_type"),
+        "target": issue.get("target"),
+        "related_scenario": issue.get("related_scenario"),
+        "related_assertion": issue.get("related_assertion"),
+        "reason": "issue is outside deterministic repair policy scope",
+        "suggested_fix": "use repair planner order for this issue type",
+        "repair_order": issue.get("suggested_repair_targets", []),
+        "confidence": "low",
+    }
+
+
+def case_summary_for_issue(summary: dict[str, Any] | None, issue: dict[str, Any]) -> dict[str, Any]:
+    if not summary:
+        return {}
+    case_name = issue.get("case")
+    for case_summary in summary.get("cases", []):
+        if case_summary.get("case") == case_name:
+            return case_summary
+    return {}
+
+
+def policy_context_for_issue(
+    issue: dict[str, Any],
+    summary: dict[str, Any] | None,
+    datasets_dir: Path | None,
+) -> dict[str, Any]:
+    case_summary = case_summary_for_issue(summary, issue)
+    scenario = issue.get("related_scenario")
+    assertion = issue.get("related_assertion")
+    observed = set(case_summary.get("scenario", {}).get("observed", []))
+    activated = set(
+        case_summary.get("assertion", {})
+        .get("activation", {})
+        .get("activated", [])
+    )
+    coverage = {}
+    if datasets_dir and issue.get("case"):
+        try:
+            coverage = load_coverage_config(case_dir(datasets_dir, str(issue["case"])))
+        except FileNotFoundError:
+            coverage = {}
+    expected_scenarios = set(scenario_ids_from_coverage(coverage))
+    return {
+        "case_summary": case_summary,
+        "coverage": coverage,
+        "trigger_observed": bool(scenario and scenario in observed),
+        "assertion_activated": bool(assertion and assertion in activated),
+        "trigger_in_coverage": bool(scenario and scenario in expected_scenarios),
+        "observed_scenarios": sorted(observed),
+        "activated_assertions": sorted(activated),
+    }
+
+
+def rule_by_id(policy_section: dict[str, Any], rule_id: str) -> dict[str, Any]:
+    for rule in policy_section.get("ordered_rules", []):
+        if rule.get("id") == rule_id:
+            return rule
+    return {}
+
+
+def mutation_repair_direction(target: str | None, policy: dict[str, Any]) -> dict[str, str | None]:
+    text = str(target or "").lower()
+    for mutation_type, repair in policy.get("mutation_type_repairs", {}).items():
+        hints = [mutation_type, *repair.get("match_hints", [])]
+        if any(str(hint).lower() in text for hint in hints):
+            return {
+                "mutation_type": mutation_type,
+                "repair_direction": repair.get("repair_direction"),
+                "suggested_fix": repair.get("suggested_fix"),
+            }
+    return {
+        "mutation_type": None,
+        "repair_direction": "strengthen_assertion",
+        "suggested_fix": "strengthen assertion around the related trigger scenario",
+    }
+
+
+def mutation_policy_decision_for_issue(
+    issue: dict[str, Any],
+    policy: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    section = policy.get("mutation_policy", {})
+    if not context.get("trigger_observed"):
+        rule = rule_by_id(section, "trigger_not_observed")
+        direction = {
+            "mutation_type": None,
+            "repair_direction": "stimulus_first",
+            "suggested_fix": rule.get("suggested_fix"),
+        }
+    elif not context.get("assertion_activated"):
+        rule = rule_by_id(section, "assertion_not_activated")
+        direction = {
+            "mutation_type": None,
+            "repair_direction": "activate_trigger",
+            "suggested_fix": rule.get("suggested_fix"),
+        }
+    else:
+        rule = rule_by_id(section, "mutation_observed_but_not_killed")
+        direction = mutation_repair_direction(str(issue.get("target")), policy)
+
+    return {
+        "policy_decision": rule.get("policy_decision", "repair_sva"),
+        "case": issue.get("case"),
+        "issue_type": issue.get("issue_type"),
+        "target": issue.get("target"),
+        "related_scenario": issue.get("related_scenario"),
+        "related_assertion": issue.get("related_assertion"),
+        "reason": rule.get("reason"),
+        "suggested_fix": direction.get("suggested_fix") or rule.get("suggested_fix"),
+        "repair_order": rule.get("repair_order", []),
+        "confidence": "high" if context.get("trigger_observed") else "medium",
+        "matched_rule": rule.get("id"),
+        "mutation_type": direction.get("mutation_type"),
+        "repair_direction": direction.get("repair_direction"),
+        "trigger_observed": context.get("trigger_observed"),
+        "assertion_activated": context.get("assertion_activated"),
+    }
+
+
+def activation_policy_decision_for_issue(
+    issue: dict[str, Any],
+    policy: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    section = policy.get("activation_policy", {})
+    if not context.get("trigger_in_coverage"):
+        rule = rule_by_id(section, "trigger_not_in_coverage")
+        confidence = "high"
+    elif not context.get("trigger_observed"):
+        rule = rule_by_id(section, "trigger_not_observed")
+        confidence = "high"
+    else:
+        rule = rule_by_id(section, "observed_but_not_activated")
+        confidence = "medium"
+
+    return {
+        "policy_decision": rule.get("policy_decision", "repair_testbench"),
+        "case": issue.get("case"),
+        "issue_type": issue.get("issue_type"),
+        "target": issue.get("target"),
+        "related_scenario": issue.get("related_scenario"),
+        "related_assertion": issue.get("related_assertion"),
+        "reason": rule.get("reason"),
+        "suggested_fix": rule.get("suggested_fix"),
+        "repair_order": rule.get("repair_order", []),
+        "confidence": confidence,
+        "matched_rule": rule.get("id"),
+        "trigger_in_coverage": context.get("trigger_in_coverage"),
+        "trigger_observed": context.get("trigger_observed"),
+        "assertion_activated": context.get("assertion_activated"),
+    }
+
+
+def repair_policy_tool(
+    diagnosis_path: Path,
+    repair_intent_path: Path | None,
+    policy_path: Path,
+    out_path: Path | None,
+    summary_path: Path | None = None,
+    case: str | None = None,
+    datasets_dir: Path | None = None,
+) -> ToolResult:
+    diagnosis_payload = json.loads(diagnosis_path.read_text(encoding="utf-8"))
+    diagnosis = diagnosis_payload.get("diagnosis", diagnosis_payload)
+    repair_plan = (
+        json.loads(repair_intent_path.read_text(encoding="utf-8"))
+        if repair_intent_path
+        else {}
+    )
+    summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path else None
+    policy = load_repair_policy(policy_path)
+    decisions = [
+        repair_policy_decision_for_issue(
+            issue if issue.get("case") or not case else {**issue, "case": case},
+            policy,
+            policy_context_for_issue(
+                issue if issue.get("case") or not case else {**issue, "case": case},
+                summary,
+                datasets_dir,
+            ),
+        )
+        for issue in diagnosis.get("issues", [])
+    ]
+    output = {
+        "mode": policy.get("mode", "deterministic_first_llm_optional"),
+        "policy": {
+            "name": policy.get("name"),
+            "version": policy.get("version"),
+            "path": str(policy_path),
+        },
+        "policy_decisions": decisions,
+        "repair_intents": repair_plan.get("repair_intents", []),
+        "safety_constraints": policy.get("safety_constraints", []),
+    }
+    artifacts = {}
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
+        artifacts["repair_policy_json"] = str(out_path)
+    return ToolResult(True, "repair_policy", output, artifacts)
+
+
 def parse_failure_log_tool(
     log_path: Path,
     case: str | None,
@@ -1771,6 +2052,15 @@ def build_parser() -> argparse.ArgumentParser:
     plan_repair.add_argument("--case")
     plan_repair.add_argument("--out", type=Path)
 
+    repair_policy_parser = subparsers.add_parser("repair-policy")
+    repair_policy_parser.add_argument("--diagnosis-json", type=Path, required=True)
+    repair_policy_parser.add_argument("--repair-intent-json", type=Path)
+    repair_policy_parser.add_argument("--summary-json", type=Path)
+    repair_policy_parser.add_argument("--case")
+    repair_policy_parser.add_argument("--datasets-dir", type=Path, default=DEFAULT_DATASETS_DIR)
+    repair_policy_parser.add_argument("--policy-json", type=Path, default=DEFAULT_REPAIR_POLICY)
+    repair_policy_parser.add_argument("--out", type=Path)
+
     repair_tp_parser = subparsers.add_parser("repair-testplan")
     repair_tp_parser.add_argument("--diagnosis-json", type=Path)
     repair_tp_parser.add_argument("--repair-intent-json", type=Path, dest="diagnosis_json")
@@ -1880,6 +2170,16 @@ def main() -> int:
                 args.out,
                 args.case,
                 args.failure_log,
+            )
+        elif args.command == "repair-policy":
+            result = repair_policy_tool(
+                args.diagnosis_json,
+                args.repair_intent_json,
+                args.policy_json,
+                args.out,
+                args.summary_json,
+                args.case,
+                args.datasets_dir,
             )
         elif args.command == "repair-testplan":
             result = repair_testplan(

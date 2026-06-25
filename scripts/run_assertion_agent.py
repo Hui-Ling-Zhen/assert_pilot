@@ -26,6 +26,7 @@ from assertpilot_tools import (
     generate_testplan,
     parse_feedback,
     plan_repair_tool,
+    repair_policy_tool,
     repair_testplan,
     repair_sva,
     repair_testbench,
@@ -633,6 +634,17 @@ def main() -> int:
             failure_log=args.failure_log,
         )
         repair_plan = repair_plan_result.output
+        repair_policy_path = iter_dir / "repair_policy.json"
+        repair_policy_result = repair_policy_tool(
+            diagnosis_path=diagnosis_path,
+            repair_intent_path=repair_intent_path,
+            policy_path=Path(__file__).resolve().parents[1] / "policies" / "repair_policy.json",
+            out_path=repair_policy_path,
+            summary_path=Path(closure_result.artifacts["summary_json"]),
+            case=args.case,
+            datasets_dir=active_datasets_dir,
+        )
+        repair_policy = repair_policy_result.output
         actions = choose_repair_actions(
             parsed_feedback,
             diagnosis,
@@ -659,6 +671,9 @@ def main() -> int:
             "repair_intent_json": str(repair_intent_path),
             "repair_intent": repair_plan,
             "repair_intents": repair_plan["repair_intents"],
+            "repair_policy_json": str(repair_policy_path),
+            "repair_policy": repair_policy,
+            "policy_decisions": repair_policy["policy_decisions"],
             "obligation_assertion_triggers": build_obligation_assertion_trace(
                 trajectory["testplan"],
                 trajectory["generated_sva"],

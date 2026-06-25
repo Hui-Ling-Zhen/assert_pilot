@@ -1,0 +1,144 @@
+{
+  "name": "AssertPilot Deterministic Repair Policy",
+  "version": 1,
+  "mode": "deterministic_first_llm_optional",
+  "description": "Policy decisions are made deterministically from diagnosis evidence first; an LLM policy may refine but should not bypass these safety constraints.",
+  "output_schema": {
+    "policy_decisions": [
+      {
+        "policy_decision": "repair_sva",
+        "case": "arbiter",
+        "issue_type": "false_positive_assertion",
+        "target": "assert_grant_requires_request",
+        "reason": "registered output checked against same-cycle input",
+        "suggested_fix": "use $past(req)",
+        "confidence": "medium"
+      }
+    ]
+  },
+  "correct_rtl_fail": {
+    "issue_type": "false_positive_assertion",
+    "ordered_rules": [
+      {
+        "id": "reset_near_failure",
+        "priority": 1,
+        "match_hints": ["reset", "rst", "time 0", "cycle 0", "reset cycle"],
+        "policy_decision": "repair_sva",
+        "reason": "failure occurs near reset; reset assertion or disable iff handling is suspicious",
+        "suggested_fix": "check whether reset properties incorrectly use disable iff (rst), and ensure non-reset properties are disabled during reset"
+      },
+      {
+        "id": "registered_output_same_cycle",
+        "priority": 2,
+        "match_hints": ["registered", "same-cycle", "same cycle", "grant", "valid_o", "ready_o", "data_o"],
+        "policy_decision": "repair_sva",
+        "reason": "registered output checked against same-cycle input",
+        "suggested_fix": "use $past(input) or $past(condition) to align with registered output timing"
+      },
+      {
+        "id": "testbench_reset_timing",
+        "priority": 3,
+        "match_hints": ["reset not released", "rst=1", "immediately after reset", "before reset release"],
+        "policy_decision": "repair_testbench",
+        "reason": "testbench appears to check behavior before reset has been released",
+        "suggested_fix": "delay stimulus/checks until after reset deassertion and at least one clock tick"
+      },
+      {
+        "id": "spec_or_rtl_ambiguity",
+        "priority": 4,
+        "match_hints": [],
+        "policy_decision": "inspect_spec_or_rtl",
+        "reason": "correct RTL failure is not classifiable from logs alone",
+        "suggested_fix": "mark spec_or_rtl_ambiguity and do not automatically weaken the assertion"
+      }
+    ]
+  },
+  "mutation_policy": {
+    "issue_type": "weak_assertion_or_missing_stimulus",
+    "ordered_rules": [
+      {
+        "id": "trigger_not_observed",
+        "condition": "related_scenario_not_observed",
+        "policy_decision": "repair_testplan_and_testbench",
+        "reason": "related trigger scenario is not observed",
+        "suggested_fix": "add or revise the testplan item and tb.cpp stimulus for the trigger scenario",
+        "repair_order": ["testplan", "tb.cpp"]
+      },
+      {
+        "id": "assertion_not_activated",
+        "condition": "related_assertion_not_activated",
+        "policy_decision": "repair_testbench_trigger",
+        "reason": "related assertion trigger is not activated",
+        "suggested_fix": "add state-bound stimulus that reaches the trigger scenario before strengthening SVA",
+        "repair_order": ["tb.cpp"]
+      },
+      {
+        "id": "mutation_observed_but_not_killed",
+        "condition": "trigger_observed_and_assertion_activated",
+        "policy_decision": "repair_sva",
+        "reason": "trigger is observed and assertion is active, but mutation is not killed",
+        "suggested_fix": "strengthen assertion according to mutation type",
+        "repair_order": ["sva"]
+      }
+    ]
+  },
+  "mutation_type_repairs": {
+    "underflow": {
+      "repair_direction": "boundary_invariant",
+      "suggested_fix": "assert empty read does not decrement count and empty remains asserted"
+    },
+    "overflow": {
+      "repair_direction": "boundary_invariant",
+      "suggested_fix": "assert full write does not increment count beyond depth and full remains asserted"
+    },
+    "stuck_flag": {
+      "match_hints": ["stuck", "flag", "full", "empty", "wrap"],
+      "repair_direction": "flag_definition_assertion",
+      "suggested_fix": "assert flag value matches the underlying count/state definition"
+    },
+    "grant_without_request": {
+      "match_hints": ["grant_without_request", "grant without request"],
+      "repair_direction": "safety_assertion",
+      "suggested_fix": "assert any grant implies a corresponding prior request"
+    },
+    "data_changes_under_stall": {
+      "match_hints": ["data_changes_under_stall", "changes_under_stall", "stall"],
+      "repair_direction": "stability_assertion",
+      "suggested_fix": "assert output data remains stable while valid is held and downstream is stalled"
+    }
+  },
+  "activation_policy": {
+    "issue_type": "unreachable_or_unstimulated_assertion",
+    "ordered_rules": [
+      {
+        "id": "trigger_not_in_coverage",
+        "condition": "trigger_scenario_missing_from_coverage",
+        "policy_decision": "repair_testplan",
+        "reason": "trigger scenario is not present in coverage_scenarios.json",
+        "suggested_fix": "add trigger scenario to coverage_scenarios/testplan before generating assertions",
+        "repair_order": ["testplan"]
+      },
+      {
+        "id": "trigger_not_observed",
+        "condition": "trigger_scenario_not_observed",
+        "policy_decision": "repair_testbench",
+        "reason": "trigger scenario is defined but not observed",
+        "suggested_fix": "add state-bound stimulus for the trigger scenario",
+        "repair_order": ["tb.cpp"]
+      },
+      {
+        "id": "observed_but_not_activated",
+        "condition": "trigger_observed_but_assertion_not_activated",
+        "policy_decision": "repair_sva",
+        "reason": "trigger is observed but assertion is not activated",
+        "suggested_fix": "inspect assertion antecedent width or signal timing alignment",
+        "repair_order": ["sva"]
+      }
+    ]
+  },
+  "safety_constraints": [
+    "Never weaken an assertion just to make buggy RTL pass.",
+    "If correct RTL and spec appear inconsistent, mark spec_or_rtl_ambiguity.",
+    "If the diagnosis is ambiguous, prefer inspect_spec_or_rtl over automatic repair."
+  ]
+}

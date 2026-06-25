@@ -118,6 +118,12 @@ AssertPilot can also be used as an agent-callable toolset. The wrapper script em
   --summary-json runs/coverage_closure/iter_0/summary.json \
   --trajectory-json runs/agent_tools/assertion_agent/trajectory.json \
   --out runs/agent_tools/repair_intent.json
+./scripts/assertpilot_tools.py repair-policy \
+  --diagnosis-json runs/agent_tools/fifo_diagnosis.json \
+  --repair-intent-json runs/agent_tools/repair_intent.json \
+  --summary-json runs/coverage_closure/iter_0/summary.json \
+  --case fifo \
+  --out runs/agent_tools/repair_policy.json
 ./scripts/assertpilot_tools.py repair-testplan \
   --repair-intent-json runs/agent_tools/repair_intent.json \
   --case fifo \
@@ -129,6 +135,50 @@ AssertPilot can also be used as an agent-callable toolset. The wrapper script em
   --llm-command "python /path/to/llm_adapter.py" \
   --out runs/agent_tools/repair_sva.json
 ./scripts/assertpilot_tools.py repair-testbench --feedback-json runs/coverage_closure/iter_0/targeted_feedback.json --out runs/agent_tools/repair_tb.json
+```
+
+The deterministic-first repair policy lives in:
+
+```text
+policies/repair_policy.json
+```
+
+For `false_positive_assertion` / correct-RTL failures, it checks rules in order:
+
+1. failure near reset: inspect `disable iff` and reset assertion handling
+2. registered output checked against same-cycle input: repair SVA with `$past(input)` alignment
+3. testbench checks before reset release: repair testbench timing
+4. otherwise mark `spec_or_rtl_ambiguity` and do not automatically weaken the assertion
+
+For `weak_assertion_or_missing_stimulus` / unkilled mutations, it checks:
+
+1. related trigger scenario not observed: repair `testplan` and `tb.cpp`
+2. trigger observed but related assertion not activated: repair trigger stimulus in `tb.cpp`
+3. trigger observed and assertion activated but mutation not killed: repair SVA
+
+Mutation type guides the SVA repair direction:
+
+| Mutation Pattern | Repair Direction |
+| --- | --- |
+| `underflow` / `overflow` | boundary invariant |
+| stuck flag | flag-definition assertion |
+| grant without request | safety assertion |
+| data changes under stall | stability assertion |
+
+For `unreachable_or_unstimulated_assertion`, it checks:
+
+1. trigger scenario missing from `coverage_scenarios.json`: repair testplan/coverage definition
+2. trigger scenario defined but not observed: repair `tb.cpp`
+3. trigger observed but assertion not activated: repair SVA antecedent or timing alignment
+
+`repair-policy` emits policy intents such as:
+
+```json
+{
+  "policy_decision": "repair_sva",
+  "reason": "registered output checked against same-cycle input",
+  "suggested_fix": "use $past(input) or $past(condition) to align with registered output timing"
+}
 ```
 
 `generate-sva` and `repair-sva` are LLM-backed by default. The external command receives:
@@ -422,7 +472,7 @@ Run the baseline:
 ```bash
 ./scripts/run_coverage_closure.py \
   --max-iters 1 \
-  --build-root runs/agent_tools/current_dataset_results/baseline
+  --build-root runs/agent_tools/policy_current_results/baseline
 ```
 
 Run one Level 3 agent iteration for each case:
@@ -459,6 +509,8 @@ Curriculum comparison over all four datasets:
 
 `Candidate After Curriculum Repair` measures all candidate repairs before strict acceptance filtering. `Accepted Curriculum Result` only applies candidates that pass issue-specific acceptance checks, so rejected `arbiter` and `handshake` repairs do not contribute to the accepted aggregate.
 
+The latest rerun with the deterministic + LLM-hybrid repair policy produced the same coverage numbers and accept/reject outcomes as the prior three-stage repair planning run. The main change is structural: each trajectory now records policy-level evidence and `policy_decisions` alongside diagnosis, repair intents, generated patches, and acceptance metrics.
+
 Observed Level 3 single-iteration results after three-stage repair planning:
 
 | Case | Level 3 Target | Score Before | Score After | Boundary Coverage | Mutation Coverage | Acceptance Checks | Decision |
@@ -471,18 +523,18 @@ Observed Level 3 single-iteration results after three-stage repair planning:
 The most recent experiment artifacts live under:
 
 ```text
-runs/agent_tools/current_dataset_results/<case>/trajectory.json
+runs/agent_tools/policy_current_results/<case>/trajectory.json
 ```
 
 The scheduler output for the next curriculum step lives under:
 
 ```text
-runs/agent_tools/current_dataset_results/next_task.json
+runs/agent_tools/policy_current_results/next_task.json
 ```
 
 It selects `arbiter` Level 4 `Mutation Killing` focused on `bug_grant_without_request`, because the boundary repair improved coverage but did not improve mutation coverage.
 
-This demonstrates the practical value of the loop compared with plain closure reporting: without the agent, feedback only reports missing Level 3 boundary scenarios and related mutation/assertion gaps; with the agent loop, the system creates candidate repairs, reruns verification, accepts only issue-specific metric improvements that preserve required coverage, and records both accepted and rejected decisions in `trajectory.json`. Each trajectory iteration also embeds self-evolution fields such as `diagnosis`, `repair_intent`, generated patches, `acceptance_metrics`, and final `decision`.
+This demonstrates the practical value of the loop compared with plain closure reporting: without the agent, feedback only reports missing Level 3 boundary scenarios and related mutation/assertion gaps; with the agent loop, the system creates candidate repairs, reruns verification, accepts only issue-specific metric improvements that preserve required coverage, and records both accepted and rejected decisions in `trajectory.json`. Each trajectory iteration also embeds self-evolution fields such as `diagnosis`, `repair_intent`, `repair_policy`, `policy_decisions`, generated patches, `acceptance_metrics`, and final `decision`.
 
 Current built-in repair coverage includes local Level 3 templates for `fifo_read_from_empty`, `counter_disabled_hold`, `arbiter_no_req_idle`, and `handshake_data_changes_under_stall`. Richer repairs can still be delegated to an external LLM repair adapter through the same structured patch schema.
 
