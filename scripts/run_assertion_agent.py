@@ -21,9 +21,12 @@ from assertpilot_tools import (
     DEFAULT_VERILATOR,
     apply_repair,
     call_llm_json,
+    diagnose_feedback_tool,
     generate_sva,
     generate_testplan,
     parse_feedback,
+    plan_repair_tool,
+    repair_testplan,
     repair_sva,
     repair_testbench,
     run_coverage_closure,
@@ -102,12 +105,31 @@ def deterministic_repair_actions(parsed_feedback: dict) -> list[str]:
 
 def choose_repair_actions(
     parsed_feedback: dict,
+    diagnosis: dict,
+    repair_plan: dict,
     trajectory: dict,
     policy_command: str | None,
 ) -> list[str]:
     """Choose repair actions with an LLM/agent policy when configured."""
     if not policy_command:
-        return deterministic_repair_actions(parsed_feedback)
+        planned_actions = []
+        for intent in repair_plan.get("repair_intents", []):
+            for target in intent.get("repair_order", []):
+                if target == "testplan":
+                    planned_actions.append("repair_testplan")
+                elif target == "tb.cpp":
+                    planned_actions.append("repair_testbench")
+                elif target == "sva":
+                    planned_actions.append("repair_sva")
+        if planned_actions:
+            return list(dict.fromkeys(planned_actions))
+        chosen = deterministic_repair_actions(parsed_feedback)
+        if any(
+            "testplan" in issue.get("suggested_repair_targets", [])
+            for issue in diagnosis.get("issues", [])
+        ):
+            chosen.insert(0, "repair_testplan")
+        return list(dict.fromkeys(chosen))
 
     response = call_llm_json(
         policy_command,
@@ -116,21 +138,32 @@ def choose_repair_actions(
             "task": "choose_repair_actions",
             "instructions": [
                 "Choose the next AssertPilot repair actions.",
-                "Allowed actions: repair_sva, repair_testbench, inspect, stop.",
+                "Allowed actions: repair_testplan, repair_sva, repair_testbench, inspect, stop.",
+                "Prefer repair_testplan before code changes when the diagnosis says a scenario is missing from the plan.",
                 "Prefer repair_testbench for missing scenarios, inactive triggers, or boundary gaps.",
                 "Prefer repair_sva when mutation gaps indicate weak assertions and correct RTL still passes.",
-                "Return JSON: {\"actions\": [\"repair_sva\", \"repair_testbench\"], \"rationale\": \"...\"}",
+                "Return JSON: {\"actions\": [\"repair_testplan\", \"repair_sva\", \"repair_testbench\"], \"rationale\": \"...\"}",
             ],
             "trajectory": trajectory,
             "feedback": parsed_feedback,
+            "diagnosis": diagnosis,
+            "repair_plan": repair_plan,
         },
     )
     actions = response.get("actions", [])
     if not isinstance(actions, list):
         raise RuntimeError("Policy command must return JSON with an actions list.")
-    allowed = {"repair_sva", "repair_testbench", "inspect", "stop"}
+    allowed = {"repair_testplan", "repair_sva", "repair_testbench", "inspect", "stop"}
     normalized = [str(action) for action in actions if str(action) in allowed]
-    return normalized or deterministic_repair_actions(parsed_feedback)
+    if normalized:
+        return normalized
+    chosen = deterministic_repair_actions(parsed_feedback)
+    if any(
+        "testplan" in issue.get("suggested_repair_targets", [])
+        for issue in diagnosis.get("issues", [])
+    ):
+        chosen.insert(0, "repair_testplan")
+    return list(dict.fromkeys(chosen))
 
 
 def write_json(path: Path, data: dict) -> None:
@@ -363,7 +396,33 @@ def main() -> int:
         score = summary["score"]
         feedback_json = Path(closure_result.artifacts["feedback_json"])
         parsed_feedback = parse_feedback(feedback_json, None).output
-        actions = choose_repair_actions(parsed_feedback, trajectory, args.policy_command)
+        diagnosis_path = iter_dir / "diagnosis.json"
+        diagnosis_result = diagnose_feedback_tool(
+            feedback_path=feedback_json,
+            summary_path=Path(closure_result.artifacts["summary_json"]),
+            failure_log=None,
+            case=args.case,
+            datasets_dir=active_datasets_dir,
+            out_path=diagnosis_path,
+        )
+        diagnosis = diagnosis_result.output
+        repair_intent_path = iter_dir / "repair_intent.json"
+        repair_plan_result = plan_repair_tool(
+            feedback_path=feedback_json,
+            summary_path=Path(closure_result.artifacts["summary_json"]),
+            trajectory_path=args.run_root / "trajectory.json",
+            datasets_dir=active_datasets_dir,
+            out_path=repair_intent_path,
+            case=args.case,
+        )
+        repair_plan = repair_plan_result.output
+        actions = choose_repair_actions(
+            parsed_feedback,
+            diagnosis,
+            repair_plan,
+            trajectory,
+            args.policy_command,
+        )
 
         iteration_record = {
             "iteration": iteration,
@@ -375,6 +434,9 @@ def main() -> int:
             "closed": score >= args.target_score and summary["closed"],
             "summary_json": closure_result.artifacts["summary_json"],
             "feedback_json": str(feedback_json),
+            "diagnosis_json": str(diagnosis_path),
+            "repair_intent_json": str(repair_intent_path),
+            "repair_intents": repair_plan["repair_intents"],
             "recommended_actions": parsed_feedback["recommended_actions"],
             "chosen_actions": actions,
             "repair_artifacts": {},
@@ -389,6 +451,20 @@ def main() -> int:
                 "reject_reason": "no structured repair patches were produced",
             },
         }
+
+        if "repair_testplan" in actions:
+            repair_path = iter_dir / "repair_testplan_plan.json"
+            repair_result = repair_testplan(
+                diagnosis_path=diagnosis_path,
+                out_path=repair_path,
+                llm_command=args.llm_command,
+                case=args.case,
+                datasets_dir=active_datasets_dir,
+                allow_plan=args.allow_repair_plan,
+            )
+            iteration_record["repair_artifacts"]["repair_testplan_plan"] = (
+                repair_result.artifacts.get("repair_testplan_plan")
+            )
 
         if "repair_sva" in actions:
             repair_path = iter_dir / "repair_sva_plan.json"

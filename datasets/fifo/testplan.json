@@ -1,0 +1,92 @@
+{
+  "case": "fifo",
+  "spec_path": null,
+  "rtl_dir": "/Users/huilingzhen/Desktop/0002-personal-projects/verification/SVA-checker/AssertPilot/datasets/fifo/rtl",
+  "top_module": "simple_fifo",
+  "valid_signals": [
+    "clk",
+    "rst",
+    "wr_en",
+    "rd_en",
+    "wdata",
+    "rdata",
+    "full",
+    "empty",
+    "count"
+  ],
+  "spec_excerpt": "",
+  "plans": [
+    {
+      "id": "fifo_reset_empty",
+      "difficulty": "required",
+      "intent": "Exercise required scenario 'fifo_reset_empty' and bind any marker to observed DUT state."
+    },
+    {
+      "id": "fifo_fill_to_full",
+      "difficulty": "required",
+      "intent": "Exercise required scenario 'fifo_fill_to_full' and bind any marker to observed DUT state."
+    },
+    {
+      "id": "fifo_write_while_full",
+      "difficulty": "required",
+      "intent": "Exercise required scenario 'fifo_write_while_full' and bind any marker to observed DUT state."
+    },
+    {
+      "id": "fifo_read_from_empty",
+      "difficulty": "bonus",
+      "intent": "Exercise harder scenario 'fifo_read_from_empty' after required behavior is stable."
+    },
+    {
+      "id": "fifo_simultaneous_read_write",
+      "difficulty": "bonus",
+      "intent": "Exercise harder scenario 'fifo_simultaneous_read_write' after required behavior is stable."
+    },
+    {
+      "id": "fifo_wrap_write_pointer",
+      "difficulty": "bonus",
+      "intent": "Exercise harder scenario 'fifo_wrap_write_pointer' after required behavior is stable."
+    },
+    {
+      "id": "fifo_wrap_read_pointer",
+      "difficulty": "bonus",
+      "intent": "Exercise harder scenario 'fifo_wrap_read_pointer' after required behavior is stable."
+    },
+    {
+      "id": "fifo_full_then_read_then_write",
+      "difficulty": "bonus",
+      "intent": "Exercise harder scenario 'fifo_full_then_read_then_write' after required behavior is stable."
+    },
+    {
+      "id": "fifo_read_from_empty",
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'fifo_read_from_empty' and check relevant assertion activation."
+    },
+    {
+      "id": "fifo_write_while_full",
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'fifo_write_while_full' and check relevant assertion activation."
+    },
+    {
+      "id": "fifo_wrap_write_pointer",
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'fifo_wrap_write_pointer' and check relevant assertion activation."
+    },
+    {
+      "id": "fifo_wrap_read_pointer",
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'fifo_wrap_read_pointer' and check relevant assertion activation."
+    },
+    {
+      "id": "fifo_full_then_read_then_write",
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'fifo_full_then_read_then_write' and check relevant assertion activation."
+    }
+  ],
+  "assertion_triggers": {
+    "assert_reset_empty": "fifo_reset_empty",
+    "assert_full_matches_count": "fifo_fill_to_full",
+    "assert_empty_matches_count": "fifo_reset_empty",
+    "assert_no_overflow": "fifo_write_while_full",
+    "assert_no_underflow": "fifo_read_from_empty"
+  }
+}

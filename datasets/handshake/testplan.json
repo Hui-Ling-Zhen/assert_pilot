@@ -1,0 +1,75 @@
+{
+  "case": "handshake",
+  "spec_path": null,
+  "rtl_dir": "/Users/huilingzhen/Desktop/0002-personal-projects/verification/SVA-checker/AssertPilot/datasets/handshake/rtl",
+  "top_module": "handshake_stage",
+  "valid_signals": [
+    "clk",
+    "rst",
+    "valid_i",
+    "ready_i",
+    "data_i",
+    "ready_o",
+    "valid_o",
+    "data_o"
+  ],
+  "spec_excerpt": "",
+  "plans": [
+    {
+      "id": "handshake_reset",
+      "difficulty": "required",
+      "intent": "Exercise required scenario 'handshake_reset' and bind any marker to observed DUT state."
+    },
+    {
+      "id": "handshake_accept_input",
+      "difficulty": "required",
+      "intent": "Exercise required scenario 'handshake_accept_input' and bind any marker to observed DUT state."
+    },
+    {
+      "id": "handshake_hold_when_stalled",
+      "difficulty": "required",
+      "intent": "Exercise required scenario 'handshake_hold_when_stalled' and bind any marker to observed DUT state."
+    },
+    {
+      "id": "handshake_back_to_back",
+      "difficulty": "bonus",
+      "intent": "Exercise harder scenario 'handshake_back_to_back' after required behavior is stable."
+    },
+    {
+      "id": "handshake_ready_toggles",
+      "difficulty": "bonus",
+      "intent": "Exercise harder scenario 'handshake_ready_toggles' after required behavior is stable."
+    },
+    {
+      "id": "handshake_stall_then_accept",
+      "difficulty": "bonus",
+      "intent": "Exercise harder scenario 'handshake_stall_then_accept' after required behavior is stable."
+    },
+    {
+      "id": "handshake_data_changes_under_stall",
+      "difficulty": "bonus",
+      "intent": "Exercise harder scenario 'handshake_data_changes_under_stall' after required behavior is stable."
+    },
+    {
+      "id": "handshake_ready_toggles",
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'handshake_ready_toggles' and check relevant assertion activation."
+    },
+    {
+      "id": "handshake_stall_then_accept",
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'handshake_stall_then_accept' and check relevant assertion activation."
+    },
+    {
+      "id": "handshake_data_changes_under_stall",
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'handshake_data_changes_under_stall' and check relevant assertion activation."
+    }
+  ],
+  "assertion_triggers": {
+    "assert_reset_clears_valid": "handshake_reset",
+    "assert_ready_definition": "handshake_ready_toggles",
+    "assert_accepted_input_reaches_output": "handshake_accept_input",
+    "assert_hold_when_stalled": "handshake_hold_when_stalled"
+  }
+}

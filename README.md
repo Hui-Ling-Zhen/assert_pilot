@@ -108,6 +108,20 @@ AssertPilot can also be used as an agent-callable toolset. The wrapper script em
 ./scripts/assertpilot_tools.py run-verilator --case fifo --variant both
 ./scripts/assertpilot_tools.py run-coverage-closure --case fifo --iteration 0
 ./scripts/assertpilot_tools.py parse-feedback --feedback-json runs/coverage_closure/iter_0/targeted_feedback.json
+./scripts/assertpilot_tools.py diagnose-feedback \
+  --feedback-json runs/coverage_closure/iter_0/targeted_feedback.json \
+  --summary-json runs/coverage_closure/iter_0/summary.json \
+  --case fifo \
+  --out runs/agent_tools/fifo_diagnosis.json
+./scripts/assertpilot_tools.py plan-repair \
+  --feedback-json runs/coverage_closure/iter_0/targeted_feedback.json \
+  --summary-json runs/coverage_closure/iter_0/summary.json \
+  --trajectory-json runs/agent_tools/assertion_agent/trajectory.json \
+  --out runs/agent_tools/repair_intent.json
+./scripts/assertpilot_tools.py repair-testplan \
+  --repair-intent-json runs/agent_tools/repair_intent.json \
+  --case fifo \
+  --out runs/agent_tools/repair_testplan.json
 ./scripts/assertpilot_tools.py repair-sva \
   --feedback-json runs/coverage_closure/iter_0/targeted_feedback.json \
   --sva-json runs/agent_tools/fifo_sva.json \
@@ -162,6 +176,61 @@ For `repair-testbench`, return:
 }
 ```
 
+For `repair-testplan`, return structured patches against the case-local `datasets/<case>/testplan.json`:
+
+```json
+{
+  "repairs": [
+    {
+      "target_file": "testplan.json",
+      "repair_type": "update_testplan_item",
+      "plan_id": "fifo_read_from_empty",
+      "updates": {
+        "intent": "Exercise read-from-empty before filling the FIFO.",
+        "expected_scenarios": ["fifo_read_from_empty"]
+      },
+      "rationale": "The boundary scenario is missing and the underflow mutation is not killed."
+    }
+  ]
+}
+```
+
+`diagnose-feedback` is the deterministic middle layer between raw logs and LLM repair tools. It maps closure feedback into stable issue records, for example:
+
+```json
+{
+  "issues": [
+    {
+      "issue_type": "weak_assertion_or_missing_stimulus",
+      "case": "fifo",
+      "target": "bug_underflow",
+      "related_assertion": "assert_no_underflow",
+      "related_scenario": "fifo_read_from_empty",
+      "suggested_repair_targets": ["tb.cpp", "sva"],
+      "severity": "high"
+    }
+  ]
+}
+```
+
+`plan-repair` consumes feedback, summary, and the current trajectory, then merges diagnosis issues into planner-level repair intents:
+
+```json
+{
+  "repair_intents": [
+    {
+      "intent_type": "add_boundary_testplan_and_stimulus",
+      "case": "fifo",
+      "target_scenario": "fifo_read_from_empty",
+      "target_mutations": ["bug_underflow"],
+      "target_assertions": ["assert_no_underflow"],
+      "repair_order": ["testplan", "tb.cpp", "sva"],
+      "reason": "boundary case missing and underflow mutation unkilled"
+    }
+  ]
+}
+```
+
 Apply a structured repair patch with:
 
 ```bash
@@ -171,11 +240,11 @@ Apply a structured repair patch with:
   --out-applied runs/agent_tools/applied_patch.json
 ```
 
-`apply-repair` only writes whitelisted files inside the selected dataset case: `rtl/property_goldmine.sva` and `sim/tb.cpp`. It rejects path escapes and unsupported repair types. Supported repair types are `replace_assertion`, `append_assertion`, `insert_stimulus`, and `replace_block`; a snapshot is saved before any target file is written.
+`apply-repair` only writes whitelisted files inside the selected dataset case: `testplan.json`, `rtl/property_goldmine.sva`, and `sim/tb.cpp`. It rejects path escapes and unsupported repair types. Supported repair types are `update_testplan_item`, `append_testplan_item`, `replace_assertion`, `append_assertion`, `insert_stimulus`, and `replace_block`; a snapshot is saved before any target file is written.
 
 For local smoke tests without an LLM, pass `--allow-scaffold` to `generate-sva` or `--allow-plan` to `repair-sva`; these modes are explicit fallbacks and are not treated as real generation.
 
-The lightweight loop scaffold stores a trajectory while repeatedly running closure and producing repair plans:
+The lightweight loop scaffold stores a trajectory while repeatedly running closure, diagnosing feedback, planning repair intents, and generating repair plans:
 
 ```bash
 ./scripts/run_assertion_agent.py \
@@ -186,7 +255,7 @@ The lightweight loop scaffold stores a trajectory while repeatedly running closu
   --policy-command "python /path/to/policy_adapter.py"
 ```
 
-`--policy-command` is optional. When present, it chooses actions from `repair_sva`, `repair_testbench`, `inspect`, and `stop` using the current trajectory and parsed feedback. Without it, the loop falls back to a deterministic policy.
+`--policy-command` is optional. When present, it chooses actions from `repair_testplan`, `repair_sva`, `repair_testbench`, `inspect`, and `stop` using the current trajectory, diagnosis, and repair plan. Without it, the loop derives actions from planner `repair_order`.
 
 Structured repairs are applied to a candidate copy before they are evaluated:
 
@@ -201,7 +270,7 @@ The loop runs coverage closure on the candidate dataset root and accepts the can
 - the correct RTL returns zero status
 - required coverage does not regress
 
-Rejected candidates stay isolated under the iteration directory and the original dataset is not modified. Each trajectory iteration records `repair_json`, `applied_patch`, `candidate_summary`, `old_score`, `new_score`, `decision`, and `reject_reason` so the result can be reused for later self-evolution.
+Rejected candidates stay isolated under the iteration directory and the original dataset is not modified. Each trajectory iteration records `diagnosis_json`, `repair_intents`, `repair_json`, `applied_patch`, `candidate_summary`, `old_score`, `new_score`, `decision`, and `reject_reason` so the result can be reused for later self-evolution.
 
 Without an external LLM repair adapter, the loop includes a minimal built-in testbench-anchor baseline for known dataset gaps. For example, when `fifo_read_from_empty` is missing, it generates a structured `insert_stimulus` patch anchored at `top->rst = 0;`, applies it to a candidate copy, and reruns closure. This keeps the loop runnable while preserving the same repair schema expected from an LLM.
 
@@ -310,6 +379,7 @@ Each dataset case contains a compact verification package:
 ```text
 case/
   spec/spec.md              # Natural-language specification
+  testplan.json             # Case-local repairable testplan artifact
   signals.json              # Reference signal list and top-module names
   rtl/design.v              # Correct RTL
   rtl/design_buggy.v        # Compatibility buggy RTL for smoke tests

@@ -1,0 +1,87 @@
+{
+  "case": "arbiter",
+  "spec_path": null,
+  "rtl_dir": "/Users/huilingzhen/Desktop/0002-personal-projects/verification/SVA-checker/AssertPilot/datasets/arbiter/rtl",
+  "top_module": "rr_arbiter",
+  "valid_signals": [
+    "clk",
+    "rst",
+    "req",
+    "grant",
+    "last_grant"
+  ],
+  "spec_excerpt": "",
+  "plans": [
+    {
+      "id": "arbiter_reset",
+      "difficulty": "required",
+      "intent": "Exercise required scenario 'arbiter_reset' and bind any marker to observed DUT state."
+    },
+    {
+      "id": "arbiter_single_req0",
+      "difficulty": "required",
+      "intent": "Exercise required scenario 'arbiter_single_req0' and bind any marker to observed DUT state."
+    },
+    {
+      "id": "arbiter_single_req1",
+      "difficulty": "required",
+      "intent": "Exercise required scenario 'arbiter_single_req1' and bind any marker to observed DUT state."
+    },
+    {
+      "id": "arbiter_both_requests",
+      "difficulty": "required",
+      "intent": "Exercise required scenario 'arbiter_both_requests' and bind any marker to observed DUT state."
+    },
+    {
+      "id": "arbiter_no_req_idle",
+      "difficulty": "bonus",
+      "intent": "Exercise harder scenario 'arbiter_no_req_idle' after required behavior is stable."
+    },
+    {
+      "id": "arbiter_alternating_grants_with_both_req",
+      "difficulty": "bonus",
+      "intent": "Exercise harder scenario 'arbiter_alternating_grants_with_both_req' after required behavior is stable."
+    },
+    {
+      "id": "arbiter_req0_drops_while_req1_stays",
+      "difficulty": "bonus",
+      "intent": "Exercise harder scenario 'arbiter_req0_drops_while_req1_stays' after required behavior is stable."
+    },
+    {
+      "id": "arbiter_priority_wraparound",
+      "difficulty": "bonus",
+      "intent": "Exercise harder scenario 'arbiter_priority_wraparound' after required behavior is stable."
+    },
+    {
+      "id": "arbiter_no_req_idle",
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'arbiter_no_req_idle' and check relevant assertion activation."
+    },
+    {
+      "id": "arbiter_both_requests",
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'arbiter_both_requests' and check relevant assertion activation."
+    },
+    {
+      "id": "arbiter_alternating_grants_with_both_req",
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'arbiter_alternating_grants_with_both_req' and check relevant assertion activation."
+    },
+    {
+      "id": "arbiter_req0_drops_while_req1_stays",
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'arbiter_req0_drops_while_req1_stays' and check relevant assertion activation."
+    },
+    {
+      "id": "arbiter_priority_wraparound",
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'arbiter_priority_wraparound' and check relevant assertion activation."
+    }
+  ],
+  "assertion_triggers": {
+    "assert_reset_clears_grant": "arbiter_reset",
+    "assert_grants_are_onehot_or_zero": "arbiter_both_requests",
+    "assert_grant_requires_request": "arbiter_no_req_idle",
+    "assert_both_requests_get_one_grant": "arbiter_both_requests"
+  }
+}

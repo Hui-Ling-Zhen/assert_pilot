@@ -30,12 +30,21 @@ DEFAULT_LLM_COMMAND_ENV = "ASSERTPILOT_LLM_COMMAND"
 ALLOWED_REPAIR_FILES = {
     "rtl/property_goldmine.sva",
     "sim/tb.cpp",
+    "testplan.json",
 }
 ALLOWED_REPAIR_TYPES = {
     "replace_assertion",
     "append_assertion",
     "insert_stimulus",
     "replace_block",
+    "update_testplan_item",
+    "append_testplan_item",
+}
+ISSUE_REPAIR_PRIORITIES = {
+    "false_positive_assertion": ["sva"],
+    "weak_assertion_or_missing_stimulus": ["tb.cpp", "sva"],
+    "unreachable_or_unstimulated_assertion": ["testplan", "tb.cpp"],
+    "missing_boundary_stimulus": ["testplan", "tb.cpp"],
 }
 
 sys.path.insert(0, str(SCRIPTS_DIR))
@@ -273,6 +282,32 @@ def build_testbench_repair_prompt(
     }
 
 
+def build_testplan_repair_prompt(
+    diagnosis: dict[str, Any],
+    testplan: dict[str, Any],
+    coverage: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "task": "repair_testplan",
+        "instructions": [
+            "Revise the case-local AssertPilot testplan using only structured patches.",
+            "Only target testplan.json.",
+            "Use update_testplan_item when a plan item exists but needs clearer intent or expected scenarios.",
+            "Use append_testplan_item when a missing scenario has no plan item.",
+            "Do not write free-form prose outside JSON.",
+            (
+                "Return JSON: {\"repairs\": [{\"target_file\": \"testplan.json\", "
+                "\"repair_type\": \"update_testplan_item\", \"plan_id\": \"fifo_read_from_empty\", "
+                "\"updates\": {\"intent\": \"...\", \"expected_scenarios\": [\"fifo_read_from_empty\"]}, "
+                "\"rationale\": \"...\"}]}"
+            ),
+        ],
+        "diagnosis": diagnosis,
+        "current_testplan": testplan,
+        "coverage_scenarios": coverage,
+    }
+
+
 def scaffold_assertions(testplan: dict[str, Any]) -> list[dict[str, str]]:
     assertions = []
     for index, plan in enumerate(testplan.get("plans", [])):
@@ -289,6 +324,274 @@ def scaffold_assertions(testplan: dict[str, Any]) -> list[dict[str, str]]:
             }
         )
     return assertions
+
+
+def tokenize_identifier(text: str | None) -> set[str]:
+    if not text:
+        return set()
+    tokens = {
+        token
+        for token in re.split(r"[^A-Za-z0-9]+", text.lower())
+        if token and token not in {"bug", "assert", "scenario", "target"}
+    }
+    return tokens
+
+
+def scenario_ids_from_coverage(coverage: dict[str, Any]) -> list[str]:
+    scenario_ids = []
+    for key in ("required", "bonus", "boundary_cases"):
+        for item in coverage.get(key, []):
+            if isinstance(item, str):
+                scenario_ids.append(item)
+            elif isinstance(item, dict) and item.get("id"):
+                scenario_ids.append(str(item["id"]))
+    return sorted(set(scenario_ids))
+
+
+def normalize_trigger_ids(trigger: Any) -> list[str]:
+    if isinstance(trigger, str):
+        return [trigger]
+    if isinstance(trigger, list):
+        return [str(item.get("id", item)) if isinstance(item, dict) else str(item) for item in trigger]
+    if isinstance(trigger, dict):
+        return normalize_trigger_ids(trigger.get("scenarios", []))
+    return []
+
+
+def best_token_match(target: str | None, candidates: list[str]) -> str | None:
+    target_tokens = tokenize_identifier(target)
+    best_candidate = None
+    best_score = 0
+    for candidate in candidates:
+        score = len(target_tokens & tokenize_identifier(candidate))
+        if score > best_score:
+            best_candidate = candidate
+            best_score = score
+    return best_candidate
+
+
+def related_assertion_for_scenario(
+    scenario: str | None,
+    assertion_triggers: dict[str, Any],
+    fallback_target: str | None = None,
+) -> str | None:
+    if scenario:
+        for assertion_name, trigger in assertion_triggers.items():
+            if scenario in normalize_trigger_ids(trigger):
+                return assertion_name
+    return best_token_match(fallback_target, list(assertion_triggers))
+
+
+def first_trigger_for_assertion(assertion_name: str | None, assertion_triggers: dict[str, Any]) -> str | None:
+    if not assertion_name:
+        return None
+    triggers = normalize_trigger_ids(assertion_triggers.get(assertion_name))
+    return triggers[0] if triggers else None
+
+
+def extract_assertion_names_from_log(log_text: str) -> list[str]:
+    names = []
+    for line in log_text.splitlines():
+        if not re.search(r"Assertion failed|\$fatal|\$stop|%Error", line, re.IGNORECASE):
+            continue
+        for pattern in (
+            r"Assertion failed.*?['\"]?([A-Za-z_][A-Za-z0-9_$]*)['\"]?",
+            r"assert(?:ion)?[_:\s-]+([A-Za-z_][A-Za-z0-9_$]*)",
+            r"\b([A-Za-z_][A-Za-z0-9_$]*assert[A-Za-z0-9_$]*)\b",
+        ):
+            match = re.search(pattern, line, re.IGNORECASE)
+            if match:
+                names.append(match.group(1))
+                break
+    return sorted(set(names))
+
+
+def parse_failure_log(log_path: Path | None, log_text: str | None, case: str | None) -> list[dict[str, Any]]:
+    """Convert raw Verilator failure text into structured diagnosis issues."""
+    text = log_text or (log_path.read_text(encoding="utf-8") if log_path else "")
+    if not text.strip():
+        return []
+
+    issues = []
+    assertion_names = extract_assertion_names_from_log(text)
+    failure_lines = [
+        line.strip()
+        for line in text.splitlines()
+        if re.search(r"Assertion failed|\$fatal|\$stop|%Error", line, re.IGNORECASE)
+    ]
+    if failure_lines and not assertion_names:
+        assertion_names = [None]
+
+    for assertion_name in assertion_names:
+        issues.append(
+            {
+                "issue_type": "false_positive_assertion",
+                "case": case,
+                "target": assertion_name or "correct_rtl_assertion_failure",
+                "related_assertion": assertion_name,
+                "related_scenario": None,
+                "suggested_repair_targets": ISSUE_REPAIR_PRIORITIES["false_positive_assertion"],
+                "severity": "critical",
+                "evidence": failure_lines[:5],
+            }
+        )
+    return issues
+
+
+def diagnose_feedback(
+    feedback: dict[str, Any],
+    summary: dict[str, Any] | None,
+    datasets_dir: Path,
+    selected_case: str | None,
+    failure_issues: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Normalize closure feedback into issue records and repair intents."""
+    issues = list(failure_issues or [])
+    summary_cases = {
+        case_summary.get("case"): case_summary
+        for case_summary in (summary or {}).get("cases", [])
+    }
+
+    for target_group in feedback.get("targets", []):
+        case_name = target_group.get("case") or selected_case
+        if not case_name:
+            continue
+        coverage = load_coverage_config(case_dir(datasets_dir, case_name))
+        assertion_triggers = coverage.get("assertion_triggers", {})
+        scenarios = scenario_ids_from_coverage(coverage)
+        case_summary = summary_cases.get(case_name, {})
+
+        for message in target_group.get("targets", []):
+            issue: dict[str, Any] | None = None
+            mutation_match = re.search(r"Mutation target '([^']+)' was not killed", message)
+            assertion_match = re.search(
+                r"Assertion '([^']+)' was not activated; drive one of its trigger scenarios: (.+)\.",
+                message,
+            )
+            boundary_match = re.search(r"Missing boundary case '([^']+)'", message)
+
+            if "Correct RTL failed assertions" in message:
+                issue = {
+                    "issue_type": "false_positive_assertion",
+                    "case": case_name,
+                    "target": "correct_rtl_assertion_failure",
+                    "related_assertion": None,
+                    "related_scenario": None,
+                    "suggested_repair_targets": ISSUE_REPAIR_PRIORITIES["false_positive_assertion"],
+                    "severity": "critical",
+                }
+            elif mutation_match:
+                target = mutation_match.group(1)
+                scenario = best_token_match(target, scenarios)
+                related_assertion = related_assertion_for_scenario(
+                    scenario,
+                    assertion_triggers,
+                    target,
+                )
+                scenario = scenario or first_trigger_for_assertion(related_assertion, assertion_triggers)
+                issue = {
+                    "issue_type": "weak_assertion_or_missing_stimulus",
+                    "case": case_name,
+                    "target": target,
+                    "related_assertion": related_assertion,
+                    "related_scenario": scenario,
+                    "suggested_repair_targets": ISSUE_REPAIR_PRIORITIES[
+                        "weak_assertion_or_missing_stimulus"
+                    ],
+                    "severity": "high",
+                }
+            elif "Mutation set is not fully killed" in message:
+                for target in case_summary.get("buggy", {}).get("unkilled_targets", []):
+                    scenario = best_token_match(target, scenarios)
+                    related_assertion = related_assertion_for_scenario(
+                        scenario,
+                        assertion_triggers,
+                        target,
+                    )
+                    scenario = scenario or first_trigger_for_assertion(
+                        related_assertion,
+                        assertion_triggers,
+                    )
+                    issues.append(
+                        {
+                            "issue_type": "weak_assertion_or_missing_stimulus",
+                            "case": case_name,
+                            "target": target,
+                            "related_assertion": related_assertion,
+                            "related_scenario": scenario,
+                            "suggested_repair_targets": ISSUE_REPAIR_PRIORITIES[
+                                "weak_assertion_or_missing_stimulus"
+                            ],
+                            "severity": "high",
+                            "evidence": [message],
+                        }
+                    )
+                continue
+            elif assertion_match:
+                assertion_name = assertion_match.group(1)
+                triggers = [item.strip() for item in assertion_match.group(2).split(",") if item.strip()]
+                issue = {
+                    "issue_type": "unreachable_or_unstimulated_assertion",
+                    "case": case_name,
+                    "target": assertion_name,
+                    "related_assertion": assertion_name,
+                    "related_scenario": triggers[0] if triggers else None,
+                    "suggested_repair_targets": ISSUE_REPAIR_PRIORITIES[
+                        "unreachable_or_unstimulated_assertion"
+                    ],
+                    "severity": "medium",
+                }
+            elif boundary_match:
+                scenario = boundary_match.group(1)
+                issue = {
+                    "issue_type": "missing_boundary_stimulus",
+                    "case": case_name,
+                    "target": scenario,
+                    "related_assertion": related_assertion_for_scenario(
+                        scenario,
+                        assertion_triggers,
+                        scenario,
+                    ),
+                    "related_scenario": scenario,
+                    "suggested_repair_targets": ISSUE_REPAIR_PRIORITIES[
+                        "missing_boundary_stimulus"
+                    ],
+                    "severity": "high",
+                }
+
+            if issue:
+                issue["evidence"] = issue.get("evidence", [message])
+                issues.append(issue)
+
+    deduped = []
+    seen = set()
+    for issue in issues:
+        key = (
+            issue.get("issue_type"),
+            issue.get("case"),
+            issue.get("target"),
+            issue.get("related_assertion"),
+            issue.get("related_scenario"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(issue)
+
+    repair_intents = [
+        {
+            "intent_type": issue["issue_type"],
+            "case": issue.get("case"),
+            "target": issue.get("target"),
+            "related_assertion": issue.get("related_assertion"),
+            "related_scenario": issue.get("related_scenario"),
+            "repair_order": issue.get("suggested_repair_targets", []),
+            "reason": issue.get("evidence", [""])[0],
+        }
+        for issue in deduped
+    ]
+
+    return {"issues": deduped, "repair_intents": repair_intents}
 
 
 def validate_repair_schema(repair: dict[str, Any]) -> None:
@@ -317,6 +620,16 @@ def validate_repair_schema(repair: dict[str, Any]) -> None:
     elif repair_type == "replace_block":
         if not repair.get("old") or not repair.get("new"):
             raise ValueError("replace_block requires old and new")
+    elif repair_type == "update_testplan_item":
+        if target_file != "testplan.json":
+            raise ValueError("update_testplan_item may only target testplan.json")
+        if not repair.get("plan_id") or not isinstance(repair.get("updates"), dict):
+            raise ValueError("update_testplan_item requires plan_id and updates object")
+    elif repair_type == "append_testplan_item":
+        if target_file != "testplan.json":
+            raise ValueError("append_testplan_item may only target testplan.json")
+        if not isinstance(repair.get("item"), dict):
+            raise ValueError("append_testplan_item requires item object")
 
 
 def resolve_repair_target(case_path: Path, target_file: str) -> Path:
@@ -378,6 +691,28 @@ def apply_replace_block(content: str, old: str, new: str) -> str:
     return content.replace(old, new, 1)
 
 
+def apply_update_testplan_item(content: str, plan_id: str, updates: dict[str, Any]) -> str:
+    testplan = json.loads(content)
+    plans = testplan.setdefault("plans", [])
+    for plan in plans:
+        if str(plan.get("id")) == plan_id:
+            plan.update(updates)
+            return json.dumps(testplan, indent=2) + "\n"
+    raise ValueError(f"Could not find testplan item: {plan_id}")
+
+
+def apply_append_testplan_item(content: str, item: dict[str, Any]) -> str:
+    testplan = json.loads(content)
+    plans = testplan.setdefault("plans", [])
+    item_id = item.get("id")
+    if not item_id:
+        raise ValueError("append_testplan_item item requires id")
+    if any(str(plan.get("id")) == str(item_id) for plan in plans):
+        raise ValueError(f"Testplan item already exists: {item_id}")
+    plans.append(item)
+    return json.dumps(testplan, indent=2) + "\n"
+
+
 def apply_single_repair(content: str, repair: dict[str, Any]) -> str:
     repair_type = repair["repair_type"]
     if repair_type == "replace_assertion":
@@ -396,6 +731,14 @@ def apply_single_repair(content: str, repair: dict[str, Any]) -> str:
         )
     if repair_type == "replace_block":
         return apply_replace_block(content, str(repair["old"]), str(repair["new"]))
+    if repair_type == "update_testplan_item":
+        return apply_update_testplan_item(
+            content,
+            str(repair["plan_id"]),
+            dict(repair["updates"]),
+        )
+    if repair_type == "append_testplan_item":
+        return apply_append_testplan_item(content, dict(repair["item"]))
     raise ValueError(f"Unsupported repair type: {repair_type}")
 
 
@@ -455,9 +798,13 @@ def generate_testplan(
     }
 
     artifacts = {}
+    if case_path:
+        case_testplan_path = case_path / "testplan.json"
+        case_testplan_path.write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
+        artifacts["case_testplan_json"] = str(case_testplan_path)
     if out_path:
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(output, indent=2), encoding="utf-8")
+        out_path.write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
         artifacts["testplan_json"] = str(out_path)
 
     return ToolResult(True, "generate_testplan", output, artifacts)
@@ -610,6 +957,327 @@ def parse_feedback(feedback_path: Path | None, summary_path: Path | None) -> Too
 
     output = {"feedback": feedback, "recommended_actions": actions}
     return ToolResult(True, "parse_feedback", output, {})
+
+
+def diagnose_feedback_tool(
+    feedback_path: Path | None,
+    summary_path: Path | None,
+    failure_log: Path | None,
+    case: str | None,
+    datasets_dir: Path,
+    out_path: Path | None,
+) -> ToolResult:
+    if feedback_path:
+        feedback = json.loads(feedback_path.read_text(encoding="utf-8"))
+    elif summary_path:
+        summary_from_path = json.loads(summary_path.read_text(encoding="utf-8"))
+        feedback = targeted_feedback(summary_from_path)
+    else:
+        raise ValueError("diagnose-feedback requires --feedback-json or --summary-json")
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path else None
+    failure_issues = parse_failure_log(failure_log, None, case)
+    diagnosis = diagnose_feedback(feedback, summary, datasets_dir, case, failure_issues)
+
+    artifacts = {}
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(diagnosis, indent=2) + "\n", encoding="utf-8")
+        artifacts["diagnosis_json"] = str(out_path)
+    return ToolResult(True, "diagnose_feedback", diagnosis, artifacts)
+
+
+def prior_intent_attempts(trajectory: dict[str, Any], intent_type: str, target: str | None) -> int:
+    attempts = 0
+    for iteration in trajectory.get("iterations", []):
+        for intent in iteration.get("repair_intents", []):
+            if intent.get("intent_type") == intent_type and (
+                intent.get("target_scenario") == target
+                or intent.get("target_mutation") == target
+                or intent.get("target_assertion") == target
+                or intent.get("target") == target
+            ):
+                attempts += 1
+    return attempts
+
+
+def issue_reason(issue: dict[str, Any]) -> str:
+    evidence = issue.get("evidence", [])
+    if isinstance(evidence, list) and evidence:
+        return str(evidence[0])
+    return str(issue.get("target") or issue.get("issue_type") or "")
+
+
+def plan_repair_intents(
+    diagnosis: dict[str, Any],
+    trajectory: dict[str, Any],
+) -> list[dict[str, Any]]:
+    issues = diagnosis.get("issues", [])
+    mutation_by_scenario: dict[str, list[dict[str, Any]]] = {}
+    inactive_by_scenario: dict[str, list[dict[str, Any]]] = {}
+    for issue in issues:
+        scenario = issue.get("related_scenario")
+        if not scenario:
+            continue
+        if issue.get("issue_type") == "weak_assertion_or_missing_stimulus":
+            mutation_by_scenario.setdefault(scenario, []).append(issue)
+        elif issue.get("issue_type") == "unreachable_or_unstimulated_assertion":
+            inactive_by_scenario.setdefault(scenario, []).append(issue)
+
+    intents = []
+    covered_issue_keys = set()
+
+    def mark(issue: dict[str, Any]) -> None:
+        covered_issue_keys.add(
+            (
+                issue.get("issue_type"),
+                issue.get("case"),
+                issue.get("target"),
+                issue.get("related_scenario"),
+            )
+        )
+
+    def is_marked(issue: dict[str, Any]) -> bool:
+        return (
+            issue.get("issue_type"),
+            issue.get("case"),
+            issue.get("target"),
+            issue.get("related_scenario"),
+        ) in covered_issue_keys
+
+    for issue in issues:
+        if issue.get("issue_type") != "missing_boundary_stimulus":
+            continue
+        scenario = issue.get("related_scenario") or issue.get("target")
+        related_mutations = mutation_by_scenario.get(str(scenario), [])
+        related_inactive = inactive_by_scenario.get(str(scenario), [])
+        reason_parts = [issue_reason(issue)]
+        reason_parts.extend(issue_reason(item) for item in related_mutations[:2])
+        reason_parts.extend(issue_reason(item) for item in related_inactive[:1])
+        intent = {
+            "intent_type": "add_boundary_testplan_and_stimulus",
+            "case": issue.get("case"),
+            "target_scenario": scenario,
+            "target_mutations": [item.get("target") for item in related_mutations],
+            "target_assertions": sorted(
+                {
+                    item.get("related_assertion")
+                    for item in [issue, *related_mutations, *related_inactive]
+                    if item.get("related_assertion")
+                }
+            ),
+            "repair_order": ["testplan", "tb.cpp", "sva"] if related_mutations else ["testplan", "tb.cpp"],
+            "reason": " ".join(part for part in reason_parts if part),
+            "prior_attempts": prior_intent_attempts(
+                trajectory,
+                "add_boundary_testplan_and_stimulus",
+                str(scenario),
+            ),
+        }
+        intents.append(intent)
+        mark(issue)
+        for item in related_mutations + related_inactive:
+            mark(item)
+
+    for issue in issues:
+        if is_marked(issue):
+            continue
+        issue_type = issue.get("issue_type")
+        if issue_type == "false_positive_assertion":
+            target = issue.get("related_assertion") or issue.get("target")
+            intents.append(
+                {
+                    "intent_type": "repair_false_positive_assertion",
+                    "case": issue.get("case"),
+                    "target_assertion": target,
+                    "repair_order": ["sva"],
+                    "reason": issue_reason(issue),
+                    "prior_attempts": prior_intent_attempts(
+                        trajectory,
+                        "repair_false_positive_assertion",
+                        str(target),
+                    ),
+                }
+            )
+        elif issue_type == "weak_assertion_or_missing_stimulus":
+            target = issue.get("target")
+            intents.append(
+                {
+                    "intent_type": "expose_or_kill_mutation",
+                    "case": issue.get("case"),
+                    "target_mutation": target,
+                    "target_scenario": issue.get("related_scenario"),
+                    "target_assertion": issue.get("related_assertion"),
+                    "repair_order": ["tb.cpp", "sva"],
+                    "reason": issue_reason(issue),
+                    "prior_attempts": prior_intent_attempts(
+                        trajectory,
+                        "expose_or_kill_mutation",
+                        str(target),
+                    ),
+                }
+            )
+        elif issue_type == "unreachable_or_unstimulated_assertion":
+            scenario = issue.get("related_scenario")
+            intents.append(
+                {
+                    "intent_type": "activate_assertion_trigger_with_plan_and_stimulus",
+                    "case": issue.get("case"),
+                    "target_scenario": scenario,
+                    "target_assertion": issue.get("related_assertion") or issue.get("target"),
+                    "repair_order": ["testplan", "tb.cpp"],
+                    "reason": issue_reason(issue),
+                    "prior_attempts": prior_intent_attempts(
+                        trajectory,
+                        "activate_assertion_trigger_with_plan_and_stimulus",
+                        str(scenario),
+                    ),
+                }
+            )
+
+    severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    severity_by_target = {
+        (
+            issue.get("case"),
+            issue.get("related_scenario") or issue.get("target"),
+        ): severity_rank.get(str(issue.get("severity")), 9)
+        for issue in issues
+    }
+    return sorted(
+        intents,
+        key=lambda intent: (
+            severity_by_target.get(
+                (
+                    intent.get("case"),
+                    intent.get("target_scenario")
+                    or intent.get("target_mutation")
+                    or intent.get("target_assertion"),
+                ),
+                9,
+            ),
+            0 if intent.get("target_mutations") else 1,
+            0 if "sva" in intent.get("repair_order", []) else 1,
+            intent.get("prior_attempts", 0),
+            intent.get("case") or "",
+            intent.get("target_scenario")
+            or intent.get("target_mutation")
+            or intent.get("target_assertion")
+            or "",
+        ),
+    )
+
+
+def plan_repair_tool(
+    feedback_path: Path,
+    summary_path: Path,
+    trajectory_path: Path | None,
+    datasets_dir: Path,
+    out_path: Path | None,
+    case: str | None = None,
+) -> ToolResult:
+    feedback = json.loads(feedback_path.read_text(encoding="utf-8"))
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    trajectory = (
+        json.loads(trajectory_path.read_text(encoding="utf-8"))
+        if trajectory_path and trajectory_path.exists()
+        else {}
+    )
+    diagnosis = diagnose_feedback(feedback, summary, datasets_dir, case, [])
+    repair_intents = plan_repair_intents(diagnosis, trajectory)
+    output = {
+        "diagnosis": diagnosis,
+        "repair_intents": repair_intents,
+    }
+    artifacts = {}
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
+        artifacts["repair_intent_json"] = str(out_path)
+    return ToolResult(True, "plan_repair", output, artifacts)
+
+
+def parse_failure_log_tool(
+    log_path: Path,
+    case: str | None,
+    out_path: Path | None,
+) -> ToolResult:
+    output = {"issues": parse_failure_log(log_path, None, case)}
+    artifacts = {}
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
+        artifacts["failure_diagnosis_json"] = str(out_path)
+    return ToolResult(True, "parse_failure_log", output, artifacts)
+
+
+def repair_testplan(
+    diagnosis_path: Path | None,
+    out_path: Path | None,
+    llm_command: str | None,
+    case: str,
+    datasets_dir: Path,
+    allow_plan: bool,
+) -> ToolResult:
+    if not diagnosis_path:
+        raise ValueError("repair-testplan requires --diagnosis-json or --repair-intent-json")
+    diagnosis_payload = json.loads(diagnosis_path.read_text(encoding="utf-8"))
+    diagnosis = diagnosis_payload.get("diagnosis", diagnosis_payload)
+    case_path = case_dir(datasets_dir, case)
+    testplan_path = case_path / "testplan.json"
+    if not testplan_path.exists():
+        generate_testplan(None, case_path / "rtl", case, datasets_dir, testplan_path)
+    testplan = json.loads(testplan_path.read_text(encoding="utf-8"))
+    coverage = load_coverage_config(case_path)
+
+    mode = "llm"
+    try:
+        llm_response = call_llm_json(
+            llm_command,
+            "repair_testplan",
+            build_testplan_repair_prompt(diagnosis, testplan, coverage),
+        )
+        repairs = llm_response.get("repairs")
+        if not isinstance(repairs, list) or not repairs:
+            raise RuntimeError("LLM response did not contain non-empty repairs.")
+        for repair in repairs:
+            if not isinstance(repair, dict):
+                raise RuntimeError("Each repair must be a JSON object.")
+            validate_repair_schema(repair)
+        output = {"mode": mode, "repairs": repairs}
+    except Exception:
+        if not allow_plan:
+            raise
+        mode = "plan_fallback"
+        proposals = []
+        existing_plan_ids = {str(plan.get("id")) for plan in testplan.get("plans", [])}
+        for issue in diagnosis.get("issues", []):
+            if issue.get("case") != case:
+                continue
+            if "testplan" not in issue.get("suggested_repair_targets", []):
+                continue
+            scenario = issue.get("related_scenario") or issue.get("target")
+            repair_type = "update_testplan_item" if scenario in existing_plan_ids else "append_testplan_item"
+            proposals.append(
+                {
+                    "case": case,
+                    "repair_type": repair_type,
+                    "target_file": "testplan.json",
+                    "plan_id": scenario if repair_type == "update_testplan_item" else None,
+                    "message": issue.get("evidence", [""])[0],
+                    "instruction": (
+                        "Revise the testplan intent and expected_scenarios so the next "
+                        "SVA/testbench repair is grounded in this scenario."
+                    ),
+                }
+            )
+        output = {"mode": mode, "proposals": proposals}
+
+    artifacts = {}
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
+        artifacts["repair_testplan_plan"] = str(out_path)
+    return ToolResult(True, "repair_testplan", output, artifacts)
 
 
 def repair_sva(
@@ -837,6 +1505,40 @@ def build_parser() -> argparse.ArgumentParser:
     parse.add_argument("--feedback-json", type=Path)
     parse.add_argument("--summary-json", type=Path)
 
+    parse_log = subparsers.add_parser("parse-failure-log")
+    parse_log.add_argument("--log", type=Path, required=True)
+    parse_log.add_argument("--case")
+    parse_log.add_argument("--out", type=Path)
+
+    diagnose = subparsers.add_parser("diagnose-feedback")
+    diagnose.add_argument("--feedback-json", type=Path)
+    diagnose.add_argument("--summary-json", type=Path)
+    diagnose.add_argument("--failure-log", type=Path)
+    diagnose.add_argument("--case")
+    diagnose.add_argument("--datasets-dir", type=Path, default=DEFAULT_DATASETS_DIR)
+    diagnose.add_argument("--out", type=Path)
+
+    plan_repair = subparsers.add_parser("plan-repair")
+    plan_repair.add_argument("--feedback-json", type=Path, required=True)
+    plan_repair.add_argument("--summary-json", type=Path, required=True)
+    plan_repair.add_argument("--trajectory-json", type=Path)
+    plan_repair.add_argument("--datasets-dir", type=Path, default=DEFAULT_DATASETS_DIR)
+    plan_repair.add_argument("--case")
+    plan_repair.add_argument("--out", type=Path)
+
+    repair_tp_parser = subparsers.add_parser("repair-testplan")
+    repair_tp_parser.add_argument("--diagnosis-json", type=Path)
+    repair_tp_parser.add_argument("--repair-intent-json", type=Path, dest="diagnosis_json")
+    repair_tp_parser.add_argument("--out", type=Path)
+    repair_tp_parser.add_argument("--llm-command", default=None)
+    repair_tp_parser.add_argument("--case", required=True)
+    repair_tp_parser.add_argument("--datasets-dir", type=Path, default=DEFAULT_DATASETS_DIR)
+    repair_tp_parser.add_argument(
+        "--allow-plan",
+        action="store_true",
+        help="Allow repair-plan fallback when no LLM command is configured.",
+    )
+
     repair_sva_parser = subparsers.add_parser("repair-sva")
     repair_sva_parser.add_argument("--feedback-json", type=Path, required=True)
     repair_sva_parser.add_argument("--out", type=Path)
@@ -913,6 +1615,35 @@ def main() -> int:
             )
         elif args.command == "parse-feedback":
             result = parse_feedback(args.feedback_json, args.summary_json)
+        elif args.command == "parse-failure-log":
+            result = parse_failure_log_tool(args.log, args.case, args.out)
+        elif args.command == "diagnose-feedback":
+            result = diagnose_feedback_tool(
+                args.feedback_json,
+                args.summary_json,
+                args.failure_log,
+                args.case,
+                args.datasets_dir,
+                args.out,
+            )
+        elif args.command == "plan-repair":
+            result = plan_repair_tool(
+                args.feedback_json,
+                args.summary_json,
+                args.trajectory_json,
+                args.datasets_dir,
+                args.out,
+                args.case,
+            )
+        elif args.command == "repair-testplan":
+            result = repair_testplan(
+                args.diagnosis_json,
+                args.out,
+                args.llm_command,
+                args.case,
+                args.datasets_dir,
+                args.allow_plan,
+            )
         elif args.command == "repair-sva":
             result = repair_sva(
                 args.feedback_json,
