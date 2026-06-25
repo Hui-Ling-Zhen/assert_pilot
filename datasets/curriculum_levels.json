@@ -1,0 +1,40 @@
+{
+  "level_1": {
+    "name": "Syntax And Reset",
+    "targets": [
+      "counter_reset",
+      "fifo_reset_empty",
+      "handshake_reset",
+      "arbiter_reset"
+    ],
+    "metrics": [
+      "correct_pass",
+      "required_coverage"
+    ]
+  },
+  "level_2": {
+    "name": "Local Functional Assertions",
+    "targets": [
+      "counter_enabled_counting",
+      "fifo_fill_to_full",
+      "arbiter_both_requests"
+    ],
+    "metrics": [
+      "scenario_coverage",
+      "assertion_activation_rate"
+    ]
+  },
+  "level_3": {
+    "name": "Boundary Assertions",
+    "targets": [
+      "fifo_read_from_empty",
+      "counter_disabled_hold",
+      "arbiter_no_req_idle",
+      "handshake_data_changes_under_stall"
+    ],
+    "metrics": [
+      "boundary_case_coverage",
+      "mutation_kill_rate"
+    ]
+  }
+}

@@ -207,7 +207,7 @@ Without an external LLM repair adapter, the loop includes a minimal built-in tes
 
 ## Agent Loop Demo
 
-The current built-in demo focuses on testbench repair as the first autonomous action. The agent reads targeted closure feedback, emits a structured `insert_stimulus` repair for `sim/tb.cpp`, applies it only to a candidate copy, reruns closure, and accepts the candidate if the score improves without breaking required coverage or correct-RTL assertions.
+The current built-in demo focuses on curriculum Level 3 boundary repair as the first autonomous action. The agent reads targeted closure feedback, emits a structured `insert_stimulus` repair for `sim/tb.cpp`, applies it only to a candidate copy, reruns closure, and accepts the candidate if the score improves without breaking required coverage or correct-RTL assertions. For Level 3, the candidate must also improve either `boundary_case_coverage` or `mutation_coverage`.
 
 Run the baseline:
 
@@ -217,17 +217,13 @@ Run the baseline:
   --build-root runs/agent_tools/experiments/baseline_closure
 ```
 
-Run one agent iteration for `fifo`:
+Run one Level 3 agent iteration for each case:
 
 ```bash
-./scripts/run_assertion_agent.py \
-  --case fifo \
-  --max-iters 1 \
-  --target-score 1.0 \
-  --allow-scaffold \
-  --allow-repair-plan \
-  --run-root runs/agent_tools/experiments/fifo \
-  --closure-build-root runs/agent_tools/experiments/fifo/closure
+./scripts/run_assertion_agent.py --case fifo --curriculum-level 3 --max-iters 1 --allow-scaffold --allow-repair-plan
+./scripts/run_assertion_agent.py --case counter --curriculum-level 3 --max-iters 1 --allow-scaffold --allow-repair-plan
+./scripts/run_assertion_agent.py --case arbiter --curriculum-level 3 --max-iters 1 --allow-scaffold --allow-repair-plan
+./scripts/run_assertion_agent.py --case handshake --curriculum-level 3 --max-iters 1 --allow-scaffold --allow-repair-plan
 ```
 
 Observed baseline over all four datasets:
@@ -242,28 +238,24 @@ Observed baseline over all four datasets:
 | Assertion activation rate | 74.17% |
 | Boundary case coverage | 16.25% |
 
-Observed `fifo` improvement after the testbench-anchor agent repair:
+Observed Level 3 single-iteration improvements after the testbench-anchor agent repair:
 
-| Metric | Before Agent Repair | After Candidate Repair | Change |
-| --- | ---: | ---: | ---: |
-| Weighted score | 67.12% | 81.50% | +14.38% |
-| Required coverage | 100.00% | 100.00% | 0.00% |
-| Bonus coverage | 0.00% | 20.00% | +20.00% |
-| Mutation coverage | 75.00% | 100.00% | +25.00% |
-| Scenario coverage | 37.50% | 50.00% | +12.50% |
-| Assertion activation rate | 80.00% | 100.00% | +20.00% |
-| Boundary case coverage | 20.00% | 40.00% | +20.00% |
-| Candidate decision | rejected/none | accepted | improved |
+| Case | Level 3 Target | Score Before | Score After | Delta | Required Coverage | Boundary Coverage | Mutation Coverage | Decision |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `fifo` | `fifo_read_from_empty` | 67.13% | 81.50% | +14.38% | 100.00% -> 100.00% | 20.00% -> 40.00% | 75.00% -> 100.00% | accepted |
+| `counter` | `counter_disabled_hold` | 68.75% | 86.67% | +17.92% | 100.00% -> 100.00% | 25.00% -> 50.00% | 75.00% -> 100.00% | accepted |
+| `arbiter` | `arbiter_no_req_idle` | 69.50% | 78.38% | +8.87% | 100.00% -> 100.00% | 20.00% -> 40.00% | 75.00% -> 75.00% | accepted |
+| `handshake` | `handshake_data_changes_under_stall` | 65.71% | 78.87% | +13.15% | 100.00% -> 100.00% | 0.00% -> 33.33% | 75.00% -> 100.00% | accepted |
 
-The accepted candidate lives under:
+The most recent experiment artifacts live under:
 
 ```text
-runs/agent_tools/experiments/fifo/iter_0/candidate/fifo/
+runs/agent_tools/curriculum_readme/<case>/trajectory.json
 ```
 
-This demonstrates the practical value of the loop compared with plain closure reporting: without the agent, feedback only reports that `fifo_read_from_empty`, `assert_no_underflow`, and `bug_underflow` are missing; with the agent loop, the system creates a candidate testbench patch, reruns verification, kills the underflow mutation, activates the underflow assertion, and records the accepted improvement in `trajectory.json`.
+This demonstrates the practical value of the loop compared with plain closure reporting: without the agent, feedback only reports missing Level 3 boundary scenarios and related mutation/assertion gaps; with the agent loop, the system creates candidate testbench patches, reruns verification, accepts only improvements that preserve required coverage, and records the decision in `trajectory.json`.
 
-Current built-in repair coverage is intentionally small: only the `fifo_read_from_empty` testbench gap has a local template. Other cases still need either additional built-in templates or an external LLM repair adapter.
+Current built-in repair coverage includes local Level 3 templates for `fifo_read_from_empty`, `counter_disabled_hold`, `arbiter_no_req_idle`, and `handshake_data_changes_under_stall`. Richer repairs can still be delegated to an external LLM repair adapter through the same structured patch schema.
 
 This is the intended integration point for a Hermes-style or custom agent runtime:
 
