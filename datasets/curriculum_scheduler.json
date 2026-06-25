@@ -1,0 +1,81 @@
+{
+  "stages": {
+    "level_1": {
+      "name": "Syntax And Reset",
+      "curriculum_level": 1,
+      "focus": "Correct RTL health, syntax, reset behavior",
+      "required_metric_improvement": "required_coverage"
+    },
+    "level_2": {
+      "name": "Local Functional Assertions",
+      "curriculum_level": 2,
+      "focus": "Required/local scenarios and assertion trigger reachability",
+      "required_metric_improvement": "assertion_activation_rate"
+    },
+    "level_3": {
+      "name": "Boundary Stimulus",
+      "curriculum_level": 3,
+      "focus": "Boundary scenario coverage before deeper mutation repair",
+      "required_metric_improvement": "boundary_case_coverage"
+    },
+    "level_4": {
+      "name": "Mutation Killing",
+      "curriculum_level": 4,
+      "focus": "Unkilled mutation targets and assertion strength",
+      "required_metric_improvement": "mutation_coverage"
+    },
+    "level_5": {
+      "name": "Cross-Case Generalization",
+      "curriculum_level": 5,
+      "focus": "Avoid overfitting one toy pattern by rotating design families",
+      "required_metric_improvement": "score"
+    }
+  },
+  "issue_stage_map": {
+    "false_positive_assertion": "level_1",
+    "missing_required_scenario": "level_2",
+    "unreachable_or_unstimulated_assertion": "level_2",
+    "missing_boundary_stimulus": "level_3",
+    "weak_assertion_or_missing_stimulus": "level_4"
+  },
+  "bug_stage_map": {
+    "reset": "level_1",
+    "nonzero": "level_1",
+    "underflow": "level_4",
+    "overflow": "level_4",
+    "stuck": "level_4",
+    "flag": "level_4",
+    "grant_without_request": "level_4",
+    "one_hot": "level_4",
+    "data_changes_under_stall": "level_4",
+    "corrupt": "level_4",
+    "drop_valid": "level_4"
+  },
+  "case_families": {
+    "counter": "arithmetic_state",
+    "fifo": "queue_storage",
+    "arbiter": "control_arbitration",
+    "handshake": "protocol_flow_control"
+  },
+  "diversity": {
+    "recent_window": 4,
+    "min_distinct_cases_per_window": 3,
+    "case_diversity_bonus": 0.25,
+    "family_diversity_bonus": 0.20,
+    "recent_retry_penalty": 0.30,
+    "repeated_failure_penalty": 0.35
+  },
+  "severity_weights": {
+    "critical": 5.0,
+    "high": 4.0,
+    "medium": 3.0,
+    "low": 1.0
+  },
+  "metric_gap_weights": {
+    "required_coverage": 2.0,
+    "assertion_activation_rate": 2.0,
+    "boundary_case_coverage": 2.5,
+    "mutation_coverage": 3.0,
+    "score": 1.0
+  }
+}

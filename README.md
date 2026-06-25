@@ -275,18 +275,96 @@ The loop runs coverage closure on the candidate dataset root and accepts the can
 
 Rejected candidates stay isolated under the iteration directory and the original dataset is not modified. Each trajectory iteration records `diagnosis_json`, `repair_intent_json`, `repair_intents`, `repair_stages`, `repair_json`, `applied_patch`, `candidate_summary`, `old_score`, `new_score`, `decision`, `acceptance_checks`, and `reject_reason` so the result can be reused for later self-evolution.
 
+Each iteration also embeds a self-evolution sample directly in `trajectory.json`, so later agents do not need to chase artifact paths before learning from accepted and rejected repairs:
+
+```json
+{
+  "diagnosis": {"issues": []},
+  "repair_intent": {"repair_intents": []},
+  "generated_testplan_patch": {"mode": "plan_fallback", "proposals": []},
+  "generated_sva_patch": {"mode": "plan_fallback", "proposals": []},
+  "generated_tb_patch": {"mode": "basic_testbench_anchor", "repairs": []},
+  "acceptance_metrics": {
+    "old_score": 0.67,
+    "new_score": 0.81,
+    "score_delta": 0.14,
+    "mutation_delta": 0.25,
+    "boundary_delta": 0.20,
+    "assertion_activation_delta": 0.20,
+    "required_delta": 0.00
+  },
+  "decision": "accepted"
+}
+```
+
 Without an external LLM repair adapter, the loop includes a minimal built-in testbench-anchor baseline for known dataset gaps. For example, when `fifo_read_from_empty` is missing, it generates a structured `insert_stimulus` patch anchored at `top->rst = 0;`, applies it to a candidate copy, and reruns closure. This keeps the loop runnable while preserving the same repair schema expected from an LLM.
 
-## Agent Loop Demo
+## Three-Stage Agent Loop
 
 The current built-in demo focuses on curriculum Level 3 boundary repair as the first autonomous action. The agent runs closure, parses feedback and optional failure logs, diagnoses issues, plans repair intent, generates candidate repairs for `testplan.json`, SVA, and optionally `sim/tb.cpp`, applies them only to a candidate copy, reruns closure, and accepts the candidate only when the metrics tied to the diagnosed issues improve.
+
+## Curriculum Scheduler
+
+The curriculum scheduler is a separate deterministic task selector. It decides which case should run next, which stage it belongs to, and which metric must improve. This keeps scheduling policy separate from the single-case repair loop.
+
+Scheduler configuration lives in:
+
+```text
+datasets/curriculum_scheduler.json
+```
+
+The scheduler uses:
+
+- `issue_stage_map` to map diagnosis types into curriculum stages.
+- `bug_stage_map` to route specific unkilled bug patterns into mutation-focused training.
+- `case_families` and diversity bonuses to avoid overfitting one toy design family.
+- rejected trajectory history to retry the right stage instead of repeating a generic repair.
+
+Run the scheduler:
+
+```bash
+./scripts/curriculum_scheduler.py \
+  --runs-root runs/agent_tools/latest_loop_results \
+  --out runs/agent_tools/scheduler/next_task.json
+```
+
+Example scheduler output after the latest four-case experiment:
+
+```json
+{
+  "next_task": {
+    "case": "arbiter",
+    "curriculum_level": 4,
+    "stage": "level_4",
+    "stage_name": "Mutation Killing",
+    "focus_issue": "weak_assertion_or_missing_stimulus",
+    "focus_target": "bug_grant_without_request",
+    "required_metric_improvement": "mutation_coverage",
+    "reason": "metric-specific repair checks failed: mutation_coverage_improves"
+  }
+}
+```
+
+Run the selected task directly:
+
+```bash
+./scripts/run_assertion_agent.py \
+  --task-json runs/agent_tools/scheduler/next_task.json \
+  --max-iters 1 \
+  --allow-scaffold \
+  --allow-repair-plan
+```
+
+`run_assertion_agent.py` preserves the scheduler's requested stage in `scheduler_task` and `curriculum_level`. Stages beyond the currently implemented local templates, such as Level 4 Mutation Killing, are mapped to `effective_curriculum_level: 3` for runnable smoke tests until stronger LLM-backed SVA/testbench repairs are plugged in.
+
+## Agent Loop Demo
 
 Run the baseline:
 
 ```bash
 ./scripts/run_coverage_closure.py \
   --max-iters 1 \
-  --build-root runs/agent_tools/experiments/baseline_closure
+  --build-root runs/agent_tools/curriculum_compare/baseline
 ```
 
 Run one Level 3 agent iteration for each case:
@@ -310,6 +388,19 @@ Observed baseline over all four datasets:
 | Assertion activation rate | 74.17% |
 | Boundary case coverage | 16.25% |
 
+Curriculum comparison over all four datasets:
+
+| Metric | Baseline Closure | Candidate After Curriculum Repair | Accepted Curriculum Result |
+| --- | ---: | ---: | ---: |
+| Weighted score | 67.77% | 81.35% | 75.85% |
+| Required coverage | 100.00% | 100.00% | 100.00% |
+| Mutation coverage | 75.00% | 93.75% | 87.50% |
+| Scenario coverage | 45.09% | 59.08% | 52.38% |
+| Assertion activation rate | 74.17% | 93.75% | 87.50% |
+| Boundary case coverage | 16.25% | 40.83% | 27.50% |
+
+`Candidate After Curriculum Repair` measures all candidate repairs before strict acceptance filtering. `Accepted Curriculum Result` only applies candidates that pass issue-specific acceptance checks, so rejected `arbiter` and `handshake` repairs do not contribute to the accepted aggregate.
+
 Observed Level 3 single-iteration results after three-stage repair planning:
 
 | Case | Level 3 Target | Score Before | Score After | Boundary Coverage | Mutation Coverage | Acceptance Checks | Decision |
@@ -322,10 +413,18 @@ Observed Level 3 single-iteration results after three-stage repair planning:
 The most recent experiment artifacts live under:
 
 ```text
-runs/agent_tools/three_stage_final/<case>/trajectory.json
+runs/agent_tools/curriculum_compare/<case>/trajectory.json
 ```
 
-This demonstrates the practical value of the loop compared with plain closure reporting: without the agent, feedback only reports missing Level 3 boundary scenarios and related mutation/assertion gaps; with the agent loop, the system creates candidate repairs, reruns verification, accepts only issue-specific metric improvements that preserve required coverage, and records both accepted and rejected decisions in `trajectory.json`.
+The scheduler output for the next curriculum step lives under:
+
+```text
+runs/agent_tools/curriculum_compare/next_task.json
+```
+
+It selects `arbiter` Level 4 `Mutation Killing` focused on `bug_grant_without_request`, because the boundary repair improved coverage but did not improve mutation coverage.
+
+This demonstrates the practical value of the loop compared with plain closure reporting: without the agent, feedback only reports missing Level 3 boundary scenarios and related mutation/assertion gaps; with the agent loop, the system creates candidate repairs, reruns verification, accepts only issue-specific metric improvements that preserve required coverage, and records both accepted and rejected decisions in `trajectory.json`. Each trajectory iteration also embeds self-evolution fields such as `diagnosis`, `repair_intent`, generated patches, `acceptance_metrics`, and final `decision`.
 
 Current built-in repair coverage includes local Level 3 templates for `fifo_read_from_empty`, `counter_disabled_hold`, `arbiter_no_req_idle`, and `handshake_data_changes_under_stall`. Richer repairs can still be delegated to an external LLM repair adapter through the same structured patch schema.
 

@@ -35,7 +35,12 @@ from assertpilot_tools import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a lightweight AssertPilot agent loop.")
-    parser.add_argument("--case", required=True, help="Dataset case to optimize.")
+    parser.add_argument("--case", help="Dataset case to optimize.")
+    parser.add_argument(
+        "--task-json",
+        type=Path,
+        help="Scheduler-selected task JSON from curriculum_scheduler.py.",
+    )
     parser.add_argument("--datasets-dir", type=Path, default=DEFAULT_DATASETS_DIR)
     parser.add_argument("--verilator", type=Path, default=DEFAULT_VERILATOR)
     parser.add_argument("--target-score", type=float, default=1.0)
@@ -43,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--curriculum-level",
         type=int,
-        choices=[1, 2, 3],
+        choices=[1, 2, 3, 4, 5],
         default=3,
         help="Curriculum level to prioritize when choosing built-in repairs.",
     )
@@ -84,7 +89,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_CLOSURE_BUILD_ROOT,
         help="Directory for coverage closure artifacts.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.task_json:
+        task_payload = json.loads(args.task_json.read_text(encoding="utf-8"))
+        task = task_payload.get("next_task", task_payload)
+        args.scheduler_task = task
+        args.case = args.case or task.get("case")
+        args.curriculum_level = int(task.get("curriculum_level", args.curriculum_level))
+    else:
+        args.scheduler_task = None
+    if not args.case:
+        parser.error("--case is required unless --task-json provides next_task.case")
+    return args
 
 
 def deterministic_repair_actions(parsed_feedback: dict) -> list[str]:
@@ -176,12 +192,26 @@ def write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def read_json_if_exists(path: str | Path | None) -> dict | None:
+    if not path:
+        return None
+    json_path = Path(path)
+    if not json_path.exists():
+        return None
+    return json.loads(json_path.read_text(encoding="utf-8"))
+
+
 def load_curriculum(datasets_dir: Path, level: int) -> dict:
     curriculum_path = datasets_dir / "curriculum_levels.json"
     if not curriculum_path.exists():
         return {"name": f"Level {level}", "targets": [], "metrics": []}
     data = json.loads(curriculum_path.read_text(encoding="utf-8"))
     return data.get(f"level_{level}", {"name": f"Level {level}", "targets": [], "metrics": []})
+
+
+def executable_curriculum_level(level: int) -> int:
+    """Map scheduler-only stages onto currently runnable repair templates."""
+    return level if level in {1, 2, 3} else 3
 
 
 def repair_json_has_patches(path: Path | None) -> bool:
@@ -397,21 +427,74 @@ def metric_check_passed(check_name: str, old_summary: dict, candidate_summary: d
     raise ValueError(f"Unknown acceptance check: {check_name}")
 
 
+def acceptance_metrics(old_summary: dict, candidate_summary: dict | None) -> dict:
+    metrics = {
+        "old_score": old_summary["score"],
+        "new_score": None,
+        "score_delta": None,
+        "old_mutation_coverage": old_summary["mutation_coverage"],
+        "new_mutation_coverage": None,
+        "mutation_delta": None,
+        "old_boundary_case_coverage": old_summary["boundary_case_coverage"],
+        "new_boundary_case_coverage": None,
+        "boundary_delta": None,
+        "old_assertion_activation_rate": old_summary["assertion_activation_rate"],
+        "new_assertion_activation_rate": None,
+        "assertion_activation_delta": None,
+        "old_required_coverage": old_summary["required_coverage"],
+        "new_required_coverage": None,
+        "required_delta": None,
+    }
+    if candidate_summary is None:
+        return metrics
+
+    metrics.update(
+        {
+            "new_score": candidate_summary["score"],
+            "score_delta": candidate_summary["score"] - old_summary["score"],
+            "new_mutation_coverage": candidate_summary["mutation_coverage"],
+            "mutation_delta": (
+                candidate_summary["mutation_coverage"] - old_summary["mutation_coverage"]
+            ),
+            "new_boundary_case_coverage": candidate_summary["boundary_case_coverage"],
+            "boundary_delta": (
+                candidate_summary["boundary_case_coverage"]
+                - old_summary["boundary_case_coverage"]
+            ),
+            "new_assertion_activation_rate": candidate_summary["assertion_activation_rate"],
+            "assertion_activation_delta": (
+                candidate_summary["assertion_activation_rate"]
+                - old_summary["assertion_activation_rate"]
+            ),
+            "new_required_coverage": candidate_summary["required_coverage"],
+            "required_delta": (
+                candidate_summary["required_coverage"] - old_summary["required_coverage"]
+            ),
+        }
+    )
+    return metrics
+
+
 def main() -> int:
     args = parse_args()
     args.run_root.mkdir(parents=True, exist_ok=True)
     active_datasets_dir = args.datasets_dir
-    curriculum = load_curriculum(args.datasets_dir, args.curriculum_level)
+    effective_level = executable_curriculum_level(args.curriculum_level)
+    curriculum = load_curriculum(args.datasets_dir, effective_level)
     level_targets = set(curriculum.get("targets", []))
+    if args.scheduler_task and args.scheduler_task.get("focus_target"):
+        level_targets.add(str(args.scheduler_task["focus_target"]))
 
     trajectory = {
         "case": args.case,
         "target_score": args.target_score,
         "initial_datasets_dir": str(args.datasets_dir),
         "curriculum_level": args.curriculum_level,
+        "effective_curriculum_level": effective_level,
         "level_name": curriculum.get("name"),
         "level_targets": sorted(level_targets),
         "level_metrics": curriculum.get("metrics", []),
+        "scheduler_task": args.scheduler_task,
         "iterations": [],
     }
 
@@ -481,6 +564,8 @@ def main() -> int:
         iteration_record = {
             "iteration": iteration,
             "curriculum_level": args.curriculum_level,
+            "effective_curriculum_level": effective_level,
+            "scheduler_task": args.scheduler_task,
             "level_targets": sorted(level_targets),
             "level_metrics": curriculum.get("metrics", []),
             "active_datasets_dir": str(active_datasets_dir),
@@ -490,8 +575,15 @@ def main() -> int:
             "feedback_json": str(feedback_json),
             "failure_log": str(args.failure_log) if args.failure_log else None,
             "diagnosis_json": str(diagnosis_path),
+            "diagnosis": diagnosis,
             "repair_intent_json": str(repair_intent_path),
+            "repair_intent": repair_plan,
             "repair_intents": repair_plan["repair_intents"],
+            "generated_testplan_patch": None,
+            "generated_sva_patch": None,
+            "generated_tb_patch": None,
+            "acceptance_metrics": acceptance_metrics(summary, None),
+            "decision": "not_attempted",
             "repair_stages": {
                 "closure": closure_result.artifacts["summary_json"],
                 "feedback": str(feedback_json),
@@ -513,6 +605,7 @@ def main() -> int:
                 "new_score": None,
                 "decision": "not_attempted",
                 "reject_reason": "no structured repair patches were produced",
+                "acceptance_metrics": acceptance_metrics(summary, None),
             },
         }
 
@@ -529,6 +622,7 @@ def main() -> int:
             iteration_record["repair_artifacts"]["repair_testplan_plan"] = (
                 repair_result.artifacts.get("repair_testplan_plan")
             )
+            iteration_record["generated_testplan_patch"] = repair_result.output
             iteration_record["repair_stages"]["candidate_repairs"]["revised_testplan"] = (
                 repair_result.artifacts.get("repair_testplan_plan")
             )
@@ -547,6 +641,7 @@ def main() -> int:
             iteration_record["repair_artifacts"]["repair_sva_plan"] = repair_result.artifacts.get(
                 "repair_sva_plan"
             )
+            iteration_record["generated_sva_patch"] = repair_result.output
             iteration_record["repair_stages"]["candidate_repairs"]["revised_sva"] = (
                 repair_result.artifacts.get("repair_sva_plan")
             )
@@ -565,6 +660,7 @@ def main() -> int:
             iteration_record["repair_artifacts"]["repair_testbench_plan"] = (
                 repair_result.artifacts.get("repair_testbench_plan")
             )
+            iteration_record["generated_tb_patch"] = repair_result.output
             iteration_record["repair_stages"]["candidate_repairs"]["revised_tb"] = (
                 repair_result.artifacts.get("repair_testbench_plan")
             )
@@ -585,6 +681,7 @@ def main() -> int:
             iteration_record["repair_artifacts"]["basic_testbench_repair"] = str(
                 basic_repair_path
             )
+            iteration_record["generated_tb_patch"] = read_json_if_exists(basic_repair_path)
             iteration_record["repair_stages"]["candidate_repairs"]["revised_tb"] = str(
                 basic_repair_path
             )
@@ -626,26 +723,35 @@ def main() -> int:
                 repair_plan,
             )
             acceptance_checks = metric_checks_for_repair(diagnosis, repair_plan, summary)
+            metrics = acceptance_metrics(summary, candidate_summary)
             iteration_record["candidate"] = {
                 "repair_json": [str(path) for path in structured_repairs],
                 "applied_patch": applied_patch_paths,
+                "applied_patch_payloads": [
+                    read_json_if_exists(path) for path in applied_patch_paths
+                ],
                 "candidate_root": str(candidate_root),
                 "candidate_summary": candidate_closure.artifacts["summary_json"],
                 "old_score": score,
                 "new_score": candidate_summary["score"],
                 "decision": decision,
                 "reject_reason": reject_reason,
+                "acceptance_metrics": metrics,
                 "acceptance_checks": {
                     check_name: metric_check_passed(check_name, summary, candidate_summary)
                     for check_name in acceptance_checks
                 },
             }
+            iteration_record["acceptance_metrics"] = metrics
+            iteration_record["decision"] = decision
+            iteration_record["reject_reason"] = reject_reason
             iteration_record["repair_stages"]["candidate_verification"] = (
                 candidate_closure.artifacts["summary_json"]
             )
             iteration_record["repair_stages"]["acceptance"] = {
                 "decision": decision,
                 "reject_reason": reject_reason,
+                "metrics": metrics,
                 "checks": iteration_record["candidate"]["acceptance_checks"],
             }
             if decision == "accepted":
