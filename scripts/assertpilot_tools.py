@@ -1,0 +1,953 @@
+#!/usr/bin/env python3
+"""Agent-callable tool wrappers for AssertPilot.
+
+The functions in this module expose AssertPilot as a small toolset that an
+agent runtime can call without depending on the monolithic `src/gen_plan.py`
+entry point. Each CLI command prints JSON so it can be consumed by a controller
+loop, Hermes-style tool runner, or a future self-evolution evaluator.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+DEFAULT_DATASETS_DIR = PROJECT_ROOT / "datasets"
+DEFAULT_RUNS_DIR = PROJECT_ROOT / "runs" / "agent_tools"
+DEFAULT_VERILATOR = PROJECT_ROOT.parent / "verilator" / "install" / "bin" / "verilator"
+DEFAULT_LLM_COMMAND_ENV = "ASSERTPILOT_LLM_COMMAND"
+ALLOWED_REPAIR_FILES = {
+    "rtl/property_goldmine.sva",
+    "sim/tb.cpp",
+}
+ALLOWED_REPAIR_TYPES = {
+    "replace_assertion",
+    "append_assertion",
+    "insert_stimulus",
+    "replace_block",
+}
+
+sys.path.insert(0, str(SCRIPTS_DIR))
+from run_coverage_closure import (  # noqa: E402
+    DEFAULT_BUILD_ROOT as DEFAULT_CLOSURE_BUILD_ROOT,
+    run_case as run_closure_case,
+    summarize_iteration,
+    targeted_feedback,
+    write_iteration_artifacts,
+)
+from run_dataset_verilator import (  # noqa: E402
+    load_case,
+    run_lint,
+    run_simulation,
+    select_variants,
+)
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    ok: bool
+    tool: str
+    output: dict[str, Any]
+    artifacts: dict[str, str]
+    error: str | None = None
+
+
+def emit(result: ToolResult) -> int:
+    print(json.dumps(asdict(result), indent=2))
+    return 0 if result.ok else 1
+
+
+def read_text(path: Path | None) -> str:
+    if path is None:
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
+def case_dir(datasets_dir: Path, case: str) -> Path:
+    path = datasets_dir / case
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset case does not exist: {path}")
+    return path
+
+
+def load_coverage_config(case_path: Path) -> dict[str, Any]:
+    coverage_path = case_path / "coverage_scenarios.json"
+    if not coverage_path.exists():
+        return {
+            "required": [],
+            "bonus": [],
+            "mutation_targets": [],
+            "assertion_triggers": {},
+            "boundary_cases": [],
+        }
+    return json.loads(coverage_path.read_text(encoding="utf-8"))
+
+
+def resolve_llm_command(llm_command: str | None) -> str | None:
+    return llm_command or os.environ.get(DEFAULT_LLM_COMMAND_ENV)
+
+
+def call_llm_json(
+    llm_command: str | None,
+    task: str,
+    prompt_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Call an external LLM/agent command with a structured JSON prompt.
+
+    The command receives the path to the prompt JSON in
+    `ASSERTPILOT_LLM_PROMPT_JSON` and the task name in `ASSERTPILOT_LLM_TASK`.
+    It must print JSON to stdout. This keeps AssertPilot independent from a
+    particular provider while making the tool genuinely LLM-backed when wired
+    to Hermes, Cursor, OpenAI, Anthropic, etc.
+    """
+    command = resolve_llm_command(llm_command)
+    if not command:
+        raise RuntimeError(
+            f"LLM command is required for {task}. Pass --llm-command or set {DEFAULT_LLM_COMMAND_ENV}."
+        )
+
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        suffix=".json",
+        delete=False,
+    ) as prompt_file:
+        json.dump(prompt_payload, prompt_file, indent=2)
+        prompt_path = Path(prompt_file.name)
+
+    env = os.environ.copy()
+    env["ASSERTPILOT_LLM_PROMPT_JSON"] = str(prompt_path)
+    env["ASSERTPILOT_LLM_TASK"] = task
+    result = subprocess.run(
+        command,
+        shell=True,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"LLM command failed for {task} with return code {result.returncode}:\n{result.stdout}"
+        )
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"LLM command for {task} must print JSON. Raw output:\n{result.stdout}"
+        ) from exc
+
+
+def extract_assertions_from_llm_response(response: dict[str, Any]) -> list[dict[str, str]]:
+    assertions = response.get("assertions")
+    if isinstance(assertions, list):
+        normalized = []
+        for index, item in enumerate(assertions):
+            if isinstance(item, str):
+                normalized.append(
+                    {"name": f"assert_agent_{index}", "plan_id": f"plan_{index}", "sva": item}
+                )
+            elif isinstance(item, dict):
+                sva = str(item.get("sva", "")).strip()
+                if not sva:
+                    continue
+                normalized.append(
+                    {
+                        "name": str(item.get("name", f"assert_agent_{index}")),
+                        "plan_id": str(item.get("plan_id", f"plan_{index}")),
+                        "sva": sva,
+                    }
+                )
+        return normalized
+
+    text = str(response.get("text", ""))
+    blocks = re.findall(r"```(?:systemverilog|sv|verilog)?\s*(.*?)```", text, re.DOTALL)
+    if not blocks and text.strip():
+        blocks = [text]
+    return [
+        {
+            "name": f"assert_agent_{index}",
+            "plan_id": f"plan_{index}",
+            "sva": block.strip(),
+        }
+        for index, block in enumerate(blocks)
+        if block.strip()
+    ]
+
+
+def build_sva_generation_prompt(testplan: dict[str, Any], rtl_dir: Path) -> dict[str, Any]:
+    design_path = rtl_dir / "design.v"
+    property_path = rtl_dir / "property_goldmine.sva"
+    bindings_path = rtl_dir / "bindings.sva"
+    return {
+        "task": "generate_sva",
+        "instructions": [
+            "Generate real SystemVerilog Assertions for the provided AssertPilot dataset.",
+            "Use only signals present in valid_signals or visible in the reference assertion module.",
+            "Prefer disable iff (rst) for non-reset properties.",
+            "Avoid vacuous properties. Make each assertion correspond to a testplan item.",
+            "Return JSON: {\"assertions\": [{\"name\": ..., \"plan_id\": ..., \"sva\": ...}]}",
+        ],
+        "testplan": testplan,
+        "rtl": {
+            "design_v": read_text(design_path)[:12000],
+            "property_goldmine_sva": read_text(property_path)[:12000],
+            "bindings_sva": read_text(bindings_path)[:6000],
+        },
+    }
+
+
+def build_sva_repair_prompt(
+    feedback: dict[str, Any],
+    sva_json: dict[str, Any] | None,
+    summary: dict[str, Any] | None,
+    rtl_dir: Path | None,
+) -> dict[str, Any]:
+    rtl_payload = {}
+    if rtl_dir:
+        rtl_payload = {
+            "design_v": read_text(rtl_dir / "design.v")[:12000],
+            "property_goldmine_sva": read_text(rtl_dir / "property_goldmine.sva")[:12000],
+            "bindings_sva": read_text(rtl_dir / "bindings.sva")[:6000],
+        }
+    return {
+        "task": "repair_sva",
+        "instructions": [
+            "Repair or strengthen SVA candidates based on coverage/mutation feedback.",
+            "If a failure is caused by missing stimulus rather than weak assertions, explain that in repair_notes.",
+            "Do not weaken assertions just to pass buggy RTL. Correct RTL must remain passing.",
+            "Return only structured repair patches. Do not return free-form text.",
+            (
+                "Return JSON: {\"repairs\": [{\"target_file\": \"rtl/property_goldmine.sva\", "
+                "\"repair_type\": \"replace_assertion\", \"assertion_name\": \"assert_no_underflow\", "
+                "\"new_sva\": \"property ... endproperty\\nassert_no_underflow: assert property(...);\", "
+                "\"rationale\": \"...\"}]}"
+            ),
+        ],
+        "feedback": feedback,
+        "summary": summary,
+        "current_sva": sva_json,
+        "rtl": rtl_payload,
+    }
+
+
+def build_testbench_repair_prompt(
+    feedback: dict[str, Any],
+    summary: dict[str, Any] | None,
+    case_path: Path,
+) -> dict[str, Any]:
+    tb_path = case_path / "sim" / "tb.cpp"
+    coverage_path = case_path / "coverage_scenarios.json"
+    return {
+        "task": "repair_testbench",
+        "instructions": [
+            "Create structured patches for the Verilator C++ testbench.",
+            "Only target sim/tb.cpp.",
+            "Use repair_type insert_stimulus for adding stimulus near an anchor comment or line.",
+            "Markers must be state-driven: print SCENARIO:<name> only after observing DUT state.",
+            "Return only structured repair patches. Do not return free-form text.",
+            (
+                "Return JSON: {\"repairs\": [{\"target_file\": \"sim/tb.cpp\", "
+                "\"repair_type\": \"insert_stimulus\", \"anchor\": \"// Extra write while full\", "
+                "\"code\": \"...\", \"expected_markers\": [\"fifo_read_from_empty\"], "
+                "\"rationale\": \"...\"}]}"
+            ),
+        ],
+        "feedback": feedback,
+        "summary": summary,
+        "testbench": read_text(tb_path)[:12000],
+        "coverage_scenarios": json.loads(read_text(coverage_path)) if coverage_path.exists() else {},
+    }
+
+
+def scaffold_assertions(testplan: dict[str, Any]) -> list[dict[str, str]]:
+    assertions = []
+    for index, plan in enumerate(testplan.get("plans", [])):
+        plan_id = plan.get("id", f"plan_{index}")
+        assertions.append(
+            {
+                "name": f"assert_agent_{plan_id}",
+                "plan_id": plan_id,
+                "status": "scaffold",
+                "sva": (
+                    f"// TODO(agent): implement assertion for {plan_id}\n"
+                    f"// Intent: {plan.get('intent', '')}"
+                ),
+            }
+        )
+    return assertions
+
+
+def validate_repair_schema(repair: dict[str, Any]) -> None:
+    target_file = repair.get("target_file")
+    repair_type = repair.get("repair_type")
+    if target_file not in ALLOWED_REPAIR_FILES:
+        raise ValueError(f"Unsupported repair target_file: {target_file!r}")
+    if repair_type not in ALLOWED_REPAIR_TYPES:
+        raise ValueError(f"Unsupported repair_type: {repair_type!r}")
+
+    if repair_type == "replace_assertion":
+        if target_file != "rtl/property_goldmine.sva":
+            raise ValueError("replace_assertion may only target rtl/property_goldmine.sva")
+        if not repair.get("assertion_name") or not repair.get("new_sva"):
+            raise ValueError("replace_assertion requires assertion_name and new_sva")
+    elif repair_type == "append_assertion":
+        if target_file != "rtl/property_goldmine.sva":
+            raise ValueError("append_assertion may only target rtl/property_goldmine.sva")
+        if not repair.get("new_sva"):
+            raise ValueError("append_assertion requires new_sva")
+    elif repair_type == "insert_stimulus":
+        if target_file != "sim/tb.cpp":
+            raise ValueError("insert_stimulus may only target sim/tb.cpp")
+        if not repair.get("anchor") or not repair.get("code"):
+            raise ValueError("insert_stimulus requires anchor and code")
+    elif repair_type == "replace_block":
+        if not repair.get("old") or not repair.get("new"):
+            raise ValueError("replace_block requires old and new")
+
+
+def resolve_repair_target(case_path: Path, target_file: str) -> Path:
+    if target_file not in ALLOWED_REPAIR_FILES:
+        raise ValueError(f"Repair target is not whitelisted: {target_file}")
+    resolved_case = case_path.resolve()
+    target_path = (case_path / target_file).resolve()
+    if not target_path.is_relative_to(resolved_case):
+        raise ValueError(f"Repair target escapes case directory: {target_file}")
+    return target_path
+
+
+def snapshot_target(target_path: Path, case_name: str, snapshot_dir: Path) -> Path:
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = f"{case_name}__{str(target_path.name)}"
+    snapshot_path = snapshot_dir / f"{safe_name}.bak"
+    suffix = 1
+    while snapshot_path.exists():
+        snapshot_path = snapshot_dir / f"{safe_name}.{suffix}.bak"
+        suffix += 1
+    snapshot_path.write_text(target_path.read_text(encoding="utf-8"), encoding="utf-8")
+    return snapshot_path
+
+
+def apply_replace_assertion(content: str, assertion_name: str, new_sva: str) -> str:
+    escaped = re.escape(assertion_name)
+    pattern = re.compile(
+        rf"property\s+\w+\s*;.*?endproperty\s*{escaped}\s*:\s*assert\s+property\s*\([^;]+?\)\s*;",
+        re.DOTALL,
+    )
+    updated, count = pattern.subn(new_sva.strip(), content, count=1)
+    if count != 1:
+        raise ValueError(f"Could not find assertion block for {assertion_name}")
+    return updated
+
+
+def apply_append_assertion(content: str, new_sva: str) -> str:
+    marker = "endmodule"
+    index = content.rfind(marker)
+    if index == -1:
+        raise ValueError("Could not find endmodule for append_assertion")
+    return content[:index].rstrip() + "\n\n" + new_sva.strip() + "\n\n" + content[index:]
+
+
+def apply_insert_stimulus(content: str, anchor: str, code: str) -> str:
+    index = content.find(anchor)
+    if index == -1:
+        raise ValueError(f"Could not find insert_stimulus anchor: {anchor}")
+    line_end = content.find("\n", index)
+    if line_end == -1:
+        line_end = len(content)
+    insertion = "\n" + code.rstrip() + "\n"
+    return content[: line_end + 1] + insertion + content[line_end + 1 :]
+
+
+def apply_replace_block(content: str, old: str, new: str) -> str:
+    if old not in content:
+        raise ValueError("Could not find old block for replace_block")
+    return content.replace(old, new, 1)
+
+
+def apply_single_repair(content: str, repair: dict[str, Any]) -> str:
+    repair_type = repair["repair_type"]
+    if repair_type == "replace_assertion":
+        return apply_replace_assertion(
+            content,
+            str(repair["assertion_name"]),
+            str(repair["new_sva"]),
+        )
+    if repair_type == "append_assertion":
+        return apply_append_assertion(content, str(repair["new_sva"]))
+    if repair_type == "insert_stimulus":
+        return apply_insert_stimulus(
+            content,
+            str(repair["anchor"]),
+            str(repair["code"]),
+        )
+    if repair_type == "replace_block":
+        return apply_replace_block(content, str(repair["old"]), str(repair["new"]))
+    raise ValueError(f"Unsupported repair type: {repair_type}")
+
+
+def generate_testplan(
+    spec_path: Path | None,
+    rtl_dir: Path | None,
+    case: str | None,
+    datasets_dir: Path,
+    out_path: Path | None,
+) -> ToolResult:
+    """Create an agent-consumable testplan JSON.
+
+    This wrapper intentionally uses a deterministic dataset-aware fallback. A
+    future LLM-backed implementation can replace the plan text while preserving
+    the JSON schema.
+    """
+    case_path = case_dir(datasets_dir, case) if case else None
+    coverage = load_coverage_config(case_path) if case_path else {}
+    signals = load_case(case_path) if case_path else {}
+    spec_text = read_text(spec_path)
+
+    plans = []
+    for scenario in coverage.get("required", []):
+        plans.append(
+            {
+                "id": scenario,
+                "difficulty": "required",
+                "intent": f"Exercise required scenario '{scenario}' and bind any marker to observed DUT state.",
+            }
+        )
+    for scenario in coverage.get("bonus", []):
+        plans.append(
+            {
+                "id": scenario,
+                "difficulty": "bonus",
+                "intent": f"Exercise harder scenario '{scenario}' after required behavior is stable.",
+            }
+        )
+    for scenario in coverage.get("boundary_cases", []):
+        plans.append(
+            {
+                "id": scenario,
+                "difficulty": "boundary",
+                "intent": f"Drive edge condition '{scenario}' and check relevant assertion activation.",
+            }
+        )
+
+    output = {
+        "case": case,
+        "spec_path": str(spec_path) if spec_path else None,
+        "rtl_dir": str(rtl_dir or (case_path / "rtl" if case_path else "")),
+        "top_module": signals.get("top_module"),
+        "valid_signals": signals.get("valid_signals", []),
+        "spec_excerpt": spec_text[:1000],
+        "plans": plans,
+        "assertion_triggers": coverage.get("assertion_triggers", {}),
+    }
+
+    artifacts = {}
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(output, indent=2), encoding="utf-8")
+        artifacts["testplan_json"] = str(out_path)
+
+    return ToolResult(True, "generate_testplan", output, artifacts)
+
+
+def generate_sva(
+    testplan_path: Path,
+    rtl_dir: Path,
+    out_path: Path | None,
+    llm_command: str | None,
+    allow_scaffold: bool,
+) -> ToolResult:
+    """Generate SVAs through an external LLM/agent command."""
+    testplan = json.loads(testplan_path.read_text(encoding="utf-8"))
+    property_path = rtl_dir / "property_goldmine.sva"
+    template = property_path.read_text(encoding="utf-8") if property_path.exists() else ""
+    mode = "llm"
+    try:
+        llm_response = call_llm_json(
+            llm_command,
+            "generate_sva",
+            build_sva_generation_prompt(testplan, rtl_dir),
+        )
+        assertions = [
+            {**assertion, "status": assertion.get("status", "llm_generated")}
+            for assertion in extract_assertions_from_llm_response(llm_response)
+        ]
+        if not assertions:
+            raise RuntimeError("LLM response did not contain any assertions.")
+    except Exception:
+        if not allow_scaffold:
+            raise
+        mode = "scaffold_fallback"
+        assertions = scaffold_assertions(testplan)
+
+    output = {
+        "testplan": str(testplan_path),
+        "rtl_dir": str(rtl_dir),
+        "template_available": bool(template),
+        "mode": mode,
+        "assertions": assertions,
+    }
+
+    artifacts = {}
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(output, indent=2), encoding="utf-8")
+        artifacts["sva_json"] = str(out_path)
+
+    return ToolResult(True, "generate_sva", output, artifacts)
+
+
+def run_verilator(
+    case: str,
+    datasets_dir: Path,
+    verilator: Path,
+    build_root: Path,
+    mode: str,
+    variant: str,
+    keep_build: bool,
+) -> ToolResult:
+    case_path = case_dir(datasets_dir, case)
+    case_config = load_case(case_path)
+    runs = []
+    ok = True
+    for selected_variant in select_variants(case_config, variant):
+        if mode == "lint":
+            result = run_lint(verilator, case_path, selected_variant)
+        else:
+            result = run_simulation(
+                verilator=verilator,
+                case_dir=case_path,
+                variant=selected_variant,
+                build_root=build_root,
+                keep_build=keep_build,
+            )
+        expected_pass = selected_variant.expected == "pass"
+        passed = result.returncode == 0 if expected_pass else result.returncode != 0
+        ok = ok and passed
+        runs.append(
+            {
+                "variant": selected_variant.name,
+                "top_module": selected_variant.top_module,
+                "expected": selected_variant.expected,
+                "returncode": result.returncode,
+                "passed_expectation": passed,
+                "log_excerpt": result.stdout[-4000:],
+            }
+        )
+
+    return ToolResult(ok, "run_verilator", {"case": case, "mode": mode, "runs": runs}, {})
+
+
+def run_coverage_closure(
+    case: str,
+    datasets_dir: Path,
+    verilator: Path,
+    build_root: Path,
+    iteration: int,
+    verbose: bool,
+) -> ToolResult:
+    case_path = case_dir(datasets_dir, case)
+    case_run = run_closure_case(
+        case_dir=case_path,
+        verilator=verilator,
+        build_root=build_root,
+        iteration=iteration,
+        verbose=verbose,
+    )
+    summary = summarize_iteration([case_run])
+    feedback_path = write_iteration_artifacts(build_root, iteration, summary)
+    output = {
+        "case": case,
+        "iteration": iteration,
+        "summary": summary,
+        "feedback": targeted_feedback(summary),
+    }
+    return ToolResult(
+        True,
+        "run_coverage_closure",
+        output,
+        {"feedback_json": str(feedback_path), "summary_json": str(feedback_path.parent / "summary.json")},
+    )
+
+
+def parse_feedback(feedback_path: Path | None, summary_path: Path | None) -> ToolResult:
+    if feedback_path:
+        feedback = json.loads(feedback_path.read_text(encoding="utf-8"))
+    elif summary_path:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        feedback = targeted_feedback(summary)
+    else:
+        raise ValueError("parse_feedback requires --feedback-json or --summary-json")
+
+    actions = []
+    for item in feedback.get("targets", []):
+        case_name = item.get("case")
+        for target in item.get("targets", []):
+            if "Mutation target" in target or "Mutation set" in target:
+                action_type = "repair_sva_or_strengthen_stimulus"
+            elif "Assertion '" in target:
+                action_type = "activate_assertion_trigger"
+            elif "boundary case" in target.lower():
+                action_type = "repair_testbench_boundary"
+            elif "bonus scenario" in target:
+                action_type = "repair_testbench_bonus"
+            else:
+                action_type = "inspect"
+            actions.append({"case": case_name, "action_type": action_type, "message": target})
+
+    output = {"feedback": feedback, "recommended_actions": actions}
+    return ToolResult(True, "parse_feedback", output, {})
+
+
+def repair_sva(
+    feedback_path: Path,
+    out_path: Path | None,
+    llm_command: str | None,
+    sva_json_path: Path | None,
+    summary_json_path: Path | None,
+    rtl_dir: Path | None,
+    allow_plan: bool,
+) -> ToolResult:
+    parsed = parse_feedback(feedback_path, None).output
+    sva_json = json.loads(sva_json_path.read_text(encoding="utf-8")) if sva_json_path else None
+    summary_json = (
+        json.loads(summary_json_path.read_text(encoding="utf-8")) if summary_json_path else None
+    )
+    mode = "llm"
+    try:
+        llm_response = call_llm_json(
+            llm_command,
+            "repair_sva",
+            build_sva_repair_prompt(parsed["feedback"], sva_json, summary_json, rtl_dir),
+        )
+        repairs = llm_response.get("repairs")
+        if not isinstance(repairs, list) or not repairs:
+            raise RuntimeError("LLM response did not contain non-empty repairs.")
+        for repair in repairs:
+            if not isinstance(repair, dict):
+                raise RuntimeError("Each repair must be a JSON object.")
+            validate_repair_schema(repair)
+        output = {"mode": mode, "repairs": repairs}
+    except Exception:
+        if not allow_plan:
+            raise
+        mode = "plan_fallback"
+        proposals = []
+        for action in parsed["recommended_actions"]:
+            if action["action_type"] in {"repair_sva_or_strengthen_stimulus", "activate_assertion_trigger"}:
+                proposals.append(
+                    {
+                        "case": action["case"],
+                        "repair_type": "sva",
+                        "message": action["message"],
+                        "instruction": (
+                            "Inspect the related assertion trigger and mutation log. "
+                            "Strengthen the property only if correct RTL still passes; otherwise revise stimulus."
+                        ),
+                    }
+                )
+        output = {"mode": mode, "proposals": proposals}
+
+    artifacts = {}
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(output, indent=2), encoding="utf-8")
+        artifacts["repair_sva_plan"] = str(out_path)
+
+    return ToolResult(True, "repair_sva", output, artifacts)
+
+
+def repair_testbench(
+    feedback_path: Path,
+    out_path: Path | None,
+    llm_command: str | None,
+    summary_json_path: Path | None,
+    case: str | None,
+    datasets_dir: Path,
+    allow_plan: bool,
+) -> ToolResult:
+    parsed = parse_feedback(feedback_path, None).output
+    case_name = case or next(
+        (
+            action["case"]
+            for action in parsed["recommended_actions"]
+            if action.get("case")
+        ),
+        None,
+    )
+    if not case_name:
+        raise ValueError("repair-testbench requires --case when feedback has no case.")
+    case_path = case_dir(datasets_dir, case_name)
+    summary_json = (
+        json.loads(summary_json_path.read_text(encoding="utf-8")) if summary_json_path else None
+    )
+
+    mode = "llm"
+    try:
+        llm_response = call_llm_json(
+            llm_command,
+            "repair_testbench",
+            build_testbench_repair_prompt(parsed["feedback"], summary_json, case_path),
+        )
+        repairs = llm_response.get("repairs")
+        if not isinstance(repairs, list) or not repairs:
+            raise RuntimeError("LLM response did not contain non-empty repairs.")
+        for repair in repairs:
+            if not isinstance(repair, dict):
+                raise RuntimeError("Each repair must be a JSON object.")
+            validate_repair_schema(repair)
+        output = {"mode": mode, "repairs": repairs}
+    except Exception:
+        if not allow_plan:
+            raise
+        mode = "plan_fallback"
+        proposals = []
+        for action in parsed["recommended_actions"]:
+            if action["action_type"].startswith("repair_testbench") or action["action_type"] == "activate_assertion_trigger":
+                proposals.append(
+                    {
+                        "case": action["case"],
+                        "repair_type": "testbench",
+                        "message": action["message"],
+                        "instruction": (
+                            "Add a stimulus phase for the missing scenario and print SCENARIO:<name> "
+                            "only after observing the corresponding DUT state."
+                        ),
+                    }
+                )
+        output = {"mode": mode, "proposals": proposals}
+
+    artifacts = {}
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(output, indent=2), encoding="utf-8")
+        artifacts["repair_testbench_plan"] = str(out_path)
+
+    return ToolResult(True, "repair_testbench", output, artifacts)
+
+
+def apply_repair(
+    repair_json_path: Path,
+    case: str,
+    datasets_dir: Path,
+    out_applied: Path | None,
+    snapshot_dir: Path,
+) -> ToolResult:
+    repair_payload = json.loads(repair_json_path.read_text(encoding="utf-8"))
+    repairs = repair_payload.get("repairs")
+    if not isinstance(repairs, list) or not repairs:
+        raise ValueError("repair JSON must contain a non-empty repairs list")
+
+    case_path = case_dir(datasets_dir, case)
+    applied = []
+    snapshots: dict[str, str] = {}
+    target_contents: dict[Path, str] = {}
+
+    for index, repair in enumerate(repairs):
+        if not isinstance(repair, dict):
+            raise ValueError(f"Repair at index {index} must be an object")
+        validate_repair_schema(repair)
+        target_path = resolve_repair_target(case_path, str(repair["target_file"]))
+        if target_path not in target_contents:
+            target_contents[target_path] = target_path.read_text(encoding="utf-8")
+        target_contents[target_path] = apply_single_repair(target_contents[target_path], repair)
+        applied.append(
+            {
+                "index": index,
+                "target_file": repair["target_file"],
+                "target_path": str(target_path),
+                "repair_type": repair["repair_type"],
+                "rationale": repair.get("rationale"),
+                "expected_markers": repair.get("expected_markers", []),
+            }
+        )
+
+    for target_path, updated_content in target_contents.items():
+        snapshots[str(target_path)] = str(snapshot_target(target_path, case, snapshot_dir))
+        target_path.write_text(updated_content, encoding="utf-8")
+
+    output = {
+        "case": case,
+        "repair_json": str(repair_json_path),
+        "applied": applied,
+        "snapshots": snapshots,
+    }
+    artifacts = {"snapshot_dir": str(snapshot_dir)}
+    if out_applied:
+        out_applied.parent.mkdir(parents=True, exist_ok=True)
+        out_applied.write_text(json.dumps(output, indent=2), encoding="utf-8")
+        artifacts["applied_patch_json"] = str(out_applied)
+
+    return ToolResult(True, "apply_repair", output, artifacts)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="AssertPilot agent-callable tools.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    gen_tp = subparsers.add_parser("generate-testplan")
+    gen_tp.add_argument("--spec", type=Path)
+    gen_tp.add_argument("--rtl-dir", type=Path)
+    gen_tp.add_argument("--case")
+    gen_tp.add_argument("--datasets-dir", type=Path, default=DEFAULT_DATASETS_DIR)
+    gen_tp.add_argument("--out", type=Path)
+
+    gen_sva = subparsers.add_parser("generate-sva")
+    gen_sva.add_argument("--testplan-json", type=Path, required=True)
+    gen_sva.add_argument("--rtl-dir", type=Path, required=True)
+    gen_sva.add_argument("--out", type=Path)
+    gen_sva.add_argument("--llm-command", default=None)
+    gen_sva.add_argument(
+        "--allow-scaffold",
+        action="store_true",
+        help="Allow TODO scaffold output when no LLM command is configured.",
+    )
+
+    verilator = subparsers.add_parser("run-verilator")
+    verilator.add_argument("--case", required=True)
+    verilator.add_argument("--datasets-dir", type=Path, default=DEFAULT_DATASETS_DIR)
+    verilator.add_argument("--verilator", type=Path, default=DEFAULT_VERILATOR)
+    verilator.add_argument("--build-root", type=Path, default=DEFAULT_RUNS_DIR / "verilator")
+    verilator.add_argument("--mode", choices=["lint", "simulate"], default="simulate")
+    verilator.add_argument("--variant", choices=["correct", "buggy", "both"], default="both")
+    verilator.add_argument("--keep-build", action="store_true")
+
+    closure = subparsers.add_parser("run-coverage-closure")
+    closure.add_argument("--case", required=True)
+    closure.add_argument("--datasets-dir", type=Path, default=DEFAULT_DATASETS_DIR)
+    closure.add_argument("--verilator", type=Path, default=DEFAULT_VERILATOR)
+    closure.add_argument("--build-root", type=Path, default=DEFAULT_CLOSURE_BUILD_ROOT)
+    closure.add_argument("--iteration", type=int, default=0)
+    closure.add_argument("--verbose", action="store_true")
+
+    parse = subparsers.add_parser("parse-feedback")
+    parse.add_argument("--feedback-json", type=Path)
+    parse.add_argument("--summary-json", type=Path)
+
+    repair_sva_parser = subparsers.add_parser("repair-sva")
+    repair_sva_parser.add_argument("--feedback-json", type=Path, required=True)
+    repair_sva_parser.add_argument("--out", type=Path)
+    repair_sva_parser.add_argument("--llm-command", default=None)
+    repair_sva_parser.add_argument("--sva-json", type=Path)
+    repair_sva_parser.add_argument("--summary-json", type=Path)
+    repair_sva_parser.add_argument("--rtl-dir", type=Path)
+    repair_sva_parser.add_argument(
+        "--allow-plan",
+        action="store_true",
+        help="Allow repair-plan fallback when no LLM command is configured.",
+    )
+
+    repair_tb_parser = subparsers.add_parser("repair-testbench")
+    repair_tb_parser.add_argument("--feedback-json", type=Path, required=True)
+    repair_tb_parser.add_argument("--out", type=Path)
+    repair_tb_parser.add_argument("--llm-command", default=None)
+    repair_tb_parser.add_argument("--summary-json", type=Path)
+    repair_tb_parser.add_argument("--case")
+    repair_tb_parser.add_argument("--datasets-dir", type=Path, default=DEFAULT_DATASETS_DIR)
+    repair_tb_parser.add_argument(
+        "--allow-plan",
+        action="store_true",
+        help="Allow repair-plan fallback when no LLM command is configured.",
+    )
+
+    apply_parser = subparsers.add_parser("apply-repair")
+    apply_parser.add_argument("--repair-json", type=Path, required=True)
+    apply_parser.add_argument("--case", required=True)
+    apply_parser.add_argument("--datasets-dir", type=Path, default=DEFAULT_DATASETS_DIR)
+    apply_parser.add_argument("--out-applied", type=Path)
+    apply_parser.add_argument(
+        "--snapshot-dir",
+        type=Path,
+        default=DEFAULT_RUNS_DIR / "snapshots",
+        help="Directory for pre-apply file snapshots.",
+    )
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        if args.command == "generate-testplan":
+            result = generate_testplan(args.spec, args.rtl_dir, args.case, args.datasets_dir, args.out)
+        elif args.command == "generate-sva":
+            result = generate_sva(
+                args.testplan_json,
+                args.rtl_dir,
+                args.out,
+                args.llm_command,
+                args.allow_scaffold,
+            )
+        elif args.command == "run-verilator":
+            result = run_verilator(
+                args.case,
+                args.datasets_dir,
+                args.verilator,
+                args.build_root,
+                args.mode,
+                args.variant,
+                args.keep_build,
+            )
+        elif args.command == "run-coverage-closure":
+            result = run_coverage_closure(
+                args.case,
+                args.datasets_dir,
+                args.verilator,
+                args.build_root,
+                args.iteration,
+                args.verbose,
+            )
+        elif args.command == "parse-feedback":
+            result = parse_feedback(args.feedback_json, args.summary_json)
+        elif args.command == "repair-sva":
+            result = repair_sva(
+                args.feedback_json,
+                args.out,
+                args.llm_command,
+                args.sva_json,
+                args.summary_json,
+                args.rtl_dir,
+                args.allow_plan,
+            )
+        elif args.command == "repair-testbench":
+            result = repair_testbench(
+                args.feedback_json,
+                args.out,
+                args.llm_command,
+                args.summary_json,
+                args.case,
+                args.datasets_dir,
+                args.allow_plan,
+            )
+        elif args.command == "apply-repair":
+            result = apply_repair(
+                args.repair_json,
+                args.case,
+                args.datasets_dir,
+                args.out_applied,
+                args.snapshot_dir,
+            )
+        else:
+            parser.error(f"Unsupported command: {args.command}")
+            return 2
+        return emit(result)
+    except Exception as exc:
+        return emit(ToolResult(False, args.command, {}, {}, str(exc)))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

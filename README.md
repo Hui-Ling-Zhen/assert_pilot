@@ -94,6 +94,128 @@ If proxy coverage is below 100%, the runner writes targeted feedback to:
 runs/coverage_closure/iter_<N>/targeted_feedback.json
 ```
 
+## Agent Tool Interface
+
+AssertPilot can also be used as an agent-callable toolset. The wrapper script emits JSON for every command:
+
+```bash
+./scripts/assertpilot_tools.py generate-testplan --case fifo --out runs/agent_tools/fifo_testplan.json
+./scripts/assertpilot_tools.py generate-sva \
+  --testplan-json runs/agent_tools/fifo_testplan.json \
+  --rtl-dir datasets/fifo/rtl \
+  --llm-command "python /path/to/llm_adapter.py" \
+  --out runs/agent_tools/fifo_sva.json
+./scripts/assertpilot_tools.py run-verilator --case fifo --variant both
+./scripts/assertpilot_tools.py run-coverage-closure --case fifo --iteration 0
+./scripts/assertpilot_tools.py parse-feedback --feedback-json runs/coverage_closure/iter_0/targeted_feedback.json
+./scripts/assertpilot_tools.py repair-sva \
+  --feedback-json runs/coverage_closure/iter_0/targeted_feedback.json \
+  --sva-json runs/agent_tools/fifo_sva.json \
+  --rtl-dir datasets/fifo/rtl \
+  --llm-command "python /path/to/llm_adapter.py" \
+  --out runs/agent_tools/repair_sva.json
+./scripts/assertpilot_tools.py repair-testbench --feedback-json runs/coverage_closure/iter_0/targeted_feedback.json --out runs/agent_tools/repair_tb.json
+```
+
+`generate-sva` and `repair-sva` are LLM-backed by default. The external command receives:
+
+```text
+ASSERTPILOT_LLM_PROMPT_JSON
+ASSERTPILOT_LLM_TASK
+```
+
+and must print JSON to stdout. For `generate-sva`, return:
+
+```json
+{"assertions": [{"name": "assert_example", "plan_id": "fifo_reset_empty", "sva": "..."}]}
+```
+
+For `repair-sva`, return:
+
+```json
+{
+  "repairs": [
+    {
+      "target_file": "rtl/property_goldmine.sva",
+      "repair_type": "replace_assertion",
+      "assertion_name": "assert_no_underflow",
+      "new_sva": "property no_underflow; ... endproperty\nassert_no_underflow: assert property(no_underflow);",
+      "rationale": "..."
+    }
+  ]
+}
+```
+
+For `repair-testbench`, return:
+
+```json
+{
+  "repairs": [
+    {
+      "target_file": "sim/tb.cpp",
+      "repair_type": "insert_stimulus",
+      "anchor": "// Extra write while full",
+      "code": "...",
+      "expected_markers": ["fifo_read_from_empty"]
+    }
+  ]
+}
+```
+
+Apply a structured repair patch with:
+
+```bash
+./scripts/assertpilot_tools.py apply-repair \
+  --repair-json runs/agent_tools/repair_sva.json \
+  --case fifo \
+  --out-applied runs/agent_tools/applied_patch.json
+```
+
+`apply-repair` only writes whitelisted files inside the selected dataset case: `rtl/property_goldmine.sva` and `sim/tb.cpp`. It rejects path escapes and unsupported repair types. Supported repair types are `replace_assertion`, `append_assertion`, `insert_stimulus`, and `replace_block`; a snapshot is saved before any target file is written.
+
+For local smoke tests without an LLM, pass `--allow-scaffold` to `generate-sva` or `--allow-plan` to `repair-sva`; these modes are explicit fallbacks and are not treated as real generation.
+
+The lightweight loop scaffold stores a trajectory while repeatedly running closure and producing repair plans:
+
+```bash
+./scripts/run_assertion_agent.py \
+  --case fifo \
+  --target-score 1.0 \
+  --max-iters 3 \
+  --llm-command "python /path/to/llm_adapter.py" \
+  --policy-command "python /path/to/policy_adapter.py"
+```
+
+`--policy-command` is optional. When present, it chooses actions from `repair_sva`, `repair_testbench`, `inspect`, and `stop` using the current trajectory and parsed feedback. Without it, the loop falls back to a deterministic policy.
+
+Structured repairs are applied to a candidate copy before they are evaluated:
+
+```text
+runs/agent_tools/assertion_agent/iter_<N>/candidate/<case>/
+```
+
+The loop runs coverage closure on the candidate dataset root and accepts the candidate only if:
+
+- correct RTL still passes
+- the candidate score is greater than the previous score
+- the correct RTL returns zero status
+- required coverage does not regress
+
+Rejected candidates stay isolated under the iteration directory and the original dataset is not modified. Each trajectory iteration records `repair_json`, `applied_patch`, `candidate_summary`, `old_score`, `new_score`, `decision`, and `reject_reason` so the result can be reused for later self-evolution.
+
+Without an external LLM repair adapter, the loop includes a minimal built-in testbench-anchor baseline for known dataset gaps. For example, when `fifo_read_from_empty` is missing, it generates a structured `insert_stimulus` patch anchored at `top->rst = 0;`, applies it to a candidate copy, and reruns closure. This keeps the loop runnable while preserving the same repair schema expected from an LLM.
+
+This is the intended integration point for a Hermes-style or custom agent runtime:
+
+```text
+while score < target:
+  inspect feedback
+  choose repair action
+  edit artifact
+  rerun verification
+  store trajectory
+```
+
 An external stimulus/testbench generator can be plugged in with:
 
 ```bash

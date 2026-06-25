@@ -75,3 +75,21 @@ Run only one RTL variant:
 ./scripts/run_dataset_verilator.py --mode simulate --case counter --variant correct
 ./scripts/run_dataset_verilator.py --mode simulate --case counter --variant buggy
 ```
+
+## Agent Tool Wrappers
+
+Use `scripts/assertpilot_tools.py` when an agent runtime needs structured JSON instead of human-oriented logs:
+
+```bash
+./scripts/assertpilot_tools.py generate-testplan --case counter --out runs/agent_tools/counter_testplan.json
+./scripts/assertpilot_tools.py generate-sva --testplan-json runs/agent_tools/counter_testplan.json --rtl-dir datasets/counter/rtl --llm-command "python /path/to/llm_adapter.py"
+./scripts/assertpilot_tools.py run-coverage-closure --case counter --iteration 0
+./scripts/assertpilot_tools.py parse-feedback --feedback-json runs/coverage_closure/iter_0/targeted_feedback.json
+./scripts/assertpilot_tools.py apply-repair --repair-json runs/agent_tools/repair_sva.json --case counter
+```
+
+`generate-sva` and `repair-sva` call an external LLM/agent command by default. Use `--allow-scaffold` or `--allow-plan` only for local smoke tests without an LLM.
+
+Structured repair JSON must target only `rtl/property_goldmine.sva` or `sim/tb.cpp`. `apply-repair` supports `replace_assertion`, `append_assertion`, `insert_stimulus`, and `replace_block`, and writes snapshots before modifying a dataset file.
+
+Use `scripts/run_assertion_agent.py` for the minimal curriculum loop scaffold. It stores `runs/agent_tools/assertion_agent/trajectory.json` with the score, feedback, chosen action types, generated SVA artifact, repair artifacts, candidate summary, and accept/reject decision for each iteration. Structured repairs are applied to `runs/agent_tools/assertion_agent/iter_<N>/candidate/<case>/` first, then rerun through closure; rejected candidates do not modify the original dataset. Add `--policy-command` to let an LLM/agent choose repair actions from trajectory and feedback. A small built-in testbench-anchor baseline currently handles the `fifo_read_from_empty` gap so the candidate apply/rerun/accept path can run without an external LLM.
