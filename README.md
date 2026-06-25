@@ -205,6 +205,67 @@ Rejected candidates stay isolated under the iteration directory and the original
 
 Without an external LLM repair adapter, the loop includes a minimal built-in testbench-anchor baseline for known dataset gaps. For example, when `fifo_read_from_empty` is missing, it generates a structured `insert_stimulus` patch anchored at `top->rst = 0;`, applies it to a candidate copy, and reruns closure. This keeps the loop runnable while preserving the same repair schema expected from an LLM.
 
+## Agent Loop Demo
+
+The current built-in demo focuses on testbench repair as the first autonomous action. The agent reads targeted closure feedback, emits a structured `insert_stimulus` repair for `sim/tb.cpp`, applies it only to a candidate copy, reruns closure, and accepts the candidate if the score improves without breaking required coverage or correct-RTL assertions.
+
+Run the baseline:
+
+```bash
+./scripts/run_coverage_closure.py \
+  --max-iters 1 \
+  --build-root runs/agent_tools/experiments/baseline_closure
+```
+
+Run one agent iteration for `fifo`:
+
+```bash
+./scripts/run_assertion_agent.py \
+  --case fifo \
+  --max-iters 1 \
+  --target-score 1.0 \
+  --allow-scaffold \
+  --allow-repair-plan \
+  --run-root runs/agent_tools/experiments/fifo \
+  --closure-build-root runs/agent_tools/experiments/fifo/closure
+```
+
+Observed baseline over all four datasets:
+
+```text
+score: 67.77%
+required_coverage: 100.00%
+bonus_coverage: 0.00%
+mutation_coverage: 75.00%
+scenario_coverage: 45.09%
+assertion_activation_rate: 74.17%
+boundary_case_coverage: 16.25%
+```
+
+Observed `fifo` improvement after the testbench-anchor agent repair:
+
+```text
+old_score: 67.12%
+new_score: 81.50%
+decision: accepted
+mutation_coverage: 75.00% -> 100.00%
+scenario_coverage: 37.50% -> 50.00%
+assertion_activation_rate: 80.00% -> 100.00%
+boundary_case_coverage: 20.00% -> 40.00%
+bonus_coverage: 0.00% -> 20.00%
+required_coverage: 100.00% -> 100.00%
+```
+
+The accepted candidate lives under:
+
+```text
+runs/agent_tools/experiments/fifo/iter_0/candidate/fifo/
+```
+
+This demonstrates the practical value of the loop compared with plain closure reporting: without the agent, feedback only reports that `fifo_read_from_empty`, `assert_no_underflow`, and `bug_underflow` are missing; with the agent loop, the system creates a candidate testbench patch, reruns verification, kills the underflow mutation, activates the underflow assertion, and records the accepted improvement in `trajectory.json`.
+
+Current built-in repair coverage is intentionally small: only the `fifo_read_from_empty` testbench gap has a local template. Other cases still need either additional built-in templates or an external LLM repair adapter.
+
 This is the intended integration point for a Hermes-style or custom agent runtime:
 
 ```text
