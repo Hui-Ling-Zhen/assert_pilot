@@ -266,17 +266,20 @@ runs/agent_tools/assertion_agent/iter_<N>/candidate/<case>/
 The loop runs coverage closure on the candidate dataset root and accepts the candidate only if:
 
 - correct RTL still passes
-- the candidate score is greater than the previous score
 - the correct RTL returns zero status
 - required coverage does not regress
+- `false_positive_assertion` repairs must recover correct-RTL assertion pass
+- `weak_assertion_or_missing_stimulus` repairs must improve mutation coverage
+- `unreachable_or_unstimulated_assertion` repairs must improve assertion activation rate
+- `missing_boundary_stimulus` repairs must improve boundary case coverage
 
-Rejected candidates stay isolated under the iteration directory and the original dataset is not modified. Each trajectory iteration records `diagnosis_json`, `repair_intents`, `repair_json`, `applied_patch`, `candidate_summary`, `old_score`, `new_score`, `decision`, and `reject_reason` so the result can be reused for later self-evolution.
+Rejected candidates stay isolated under the iteration directory and the original dataset is not modified. Each trajectory iteration records `diagnosis_json`, `repair_intent_json`, `repair_intents`, `repair_stages`, `repair_json`, `applied_patch`, `candidate_summary`, `old_score`, `new_score`, `decision`, `acceptance_checks`, and `reject_reason` so the result can be reused for later self-evolution.
 
 Without an external LLM repair adapter, the loop includes a minimal built-in testbench-anchor baseline for known dataset gaps. For example, when `fifo_read_from_empty` is missing, it generates a structured `insert_stimulus` patch anchored at `top->rst = 0;`, applies it to a candidate copy, and reruns closure. This keeps the loop runnable while preserving the same repair schema expected from an LLM.
 
 ## Agent Loop Demo
 
-The current built-in demo focuses on curriculum Level 3 boundary repair as the first autonomous action. The agent reads targeted closure feedback, emits a structured `insert_stimulus` repair for `sim/tb.cpp`, applies it only to a candidate copy, reruns closure, and accepts the candidate if the score improves without breaking required coverage or correct-RTL assertions. For Level 3, the candidate must also improve either `boundary_case_coverage` or `mutation_coverage`.
+The current built-in demo focuses on curriculum Level 3 boundary repair as the first autonomous action. The agent runs closure, parses feedback and optional failure logs, diagnoses issues, plans repair intent, generates candidate repairs for `testplan.json`, SVA, and optionally `sim/tb.cpp`, applies them only to a candidate copy, reruns closure, and accepts the candidate only when the metrics tied to the diagnosed issues improve.
 
 Run the baseline:
 
@@ -307,22 +310,22 @@ Observed baseline over all four datasets:
 | Assertion activation rate | 74.17% |
 | Boundary case coverage | 16.25% |
 
-Observed Level 3 single-iteration improvements after the testbench-anchor agent repair:
+Observed Level 3 single-iteration results after three-stage repair planning:
 
-| Case | Level 3 Target | Score Before | Score After | Delta | Required Coverage | Boundary Coverage | Mutation Coverage | Decision |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| `fifo` | `fifo_read_from_empty` | 67.13% | 81.50% | +14.38% | 100.00% -> 100.00% | 20.00% -> 40.00% | 75.00% -> 100.00% | accepted |
-| `counter` | `counter_disabled_hold` | 68.75% | 86.67% | +17.92% | 100.00% -> 100.00% | 25.00% -> 50.00% | 75.00% -> 100.00% | accepted |
-| `arbiter` | `arbiter_no_req_idle` | 69.50% | 78.38% | +8.87% | 100.00% -> 100.00% | 20.00% -> 40.00% | 75.00% -> 75.00% | accepted |
-| `handshake` | `handshake_data_changes_under_stall` | 65.71% | 78.87% | +13.15% | 100.00% -> 100.00% | 0.00% -> 33.33% | 75.00% -> 100.00% | accepted |
+| Case | Level 3 Target | Score Before | Score After | Boundary Coverage | Mutation Coverage | Acceptance Checks | Decision |
+| --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| `fifo` | `fifo_read_from_empty` | 67.13% | 81.50% | 20.00% -> 40.00% | 75.00% -> 100.00% | mutation, activation, boundary all improved | accepted |
+| `counter` | `counter_disabled_hold` | 68.75% | 86.67% | 25.00% -> 50.00% | 75.00% -> 100.00% | mutation, activation, boundary all improved | accepted |
+| `arbiter` | `arbiter_no_req_idle` | 69.50% | 78.38% | 20.00% -> 40.00% | 75.00% -> 75.00% | boundary and activation improved; mutation did not | rejected |
+| `handshake` | `handshake_data_changes_under_stall` | 65.71% | 78.87% | 0.00% -> 33.33% | 75.00% -> 100.00% | boundary and mutation improved; activation did not | rejected |
 
 The most recent experiment artifacts live under:
 
 ```text
-runs/agent_tools/curriculum_readme/<case>/trajectory.json
+runs/agent_tools/three_stage_final/<case>/trajectory.json
 ```
 
-This demonstrates the practical value of the loop compared with plain closure reporting: without the agent, feedback only reports missing Level 3 boundary scenarios and related mutation/assertion gaps; with the agent loop, the system creates candidate testbench patches, reruns verification, accepts only improvements that preserve required coverage, and records the decision in `trajectory.json`.
+This demonstrates the practical value of the loop compared with plain closure reporting: without the agent, feedback only reports missing Level 3 boundary scenarios and related mutation/assertion gaps; with the agent loop, the system creates candidate repairs, reruns verification, accepts only issue-specific metric improvements that preserve required coverage, and records both accepted and rejected decisions in `trajectory.json`.
 
 Current built-in repair coverage includes local Level 3 templates for `fifo_read_from_empty`, `counter_disabled_hold`, `arbiter_no_req_idle`, and `handshake_data_changes_under_stall`. Richer repairs can still be delegated to an external LLM repair adapter through the same structured patch schema.
 

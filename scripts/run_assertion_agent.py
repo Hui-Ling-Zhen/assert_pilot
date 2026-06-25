@@ -58,6 +58,11 @@ def parse_args() -> argparse.Namespace:
         help="External command used to choose repair actions from trajectory and feedback.",
     )
     parser.add_argument(
+        "--failure-log",
+        type=Path,
+        help="Optional Verilator failure log to include in diagnosis and repair planning.",
+    )
+    parser.add_argument(
         "--allow-scaffold",
         action="store_true",
         help="Allow generate_sva TODO scaffold fallback when no LLM command is configured.",
@@ -314,11 +319,10 @@ def prepare_candidate_case(
 def candidate_acceptance_decision(
     old_summary: dict,
     candidate_summary: dict,
-    curriculum_level: int,
+    diagnosis: dict,
+    repair_plan: dict,
 ) -> tuple[str, str | None]:
     new_case = candidate_summary["cases"][0]
-    old_score = old_summary["score"]
-    new_score = candidate_summary["score"]
     old_required = old_summary["required_coverage"]
     new_required = candidate_summary["required_coverage"]
 
@@ -328,20 +332,69 @@ def candidate_acceptance_decision(
         return "rejected", "correct RTL returned non-zero status"
     if new_required < old_required:
         return "rejected", "required coverage regressed"
-    if new_score <= old_score:
-        return "rejected", "candidate score did not improve"
-    if curriculum_level == 3:
-        boundary_improved = (
-            candidate_summary["boundary_case_coverage"]
-            > old_summary["boundary_case_coverage"]
-        )
-        mutation_improved = (
-            candidate_summary["mutation_coverage"]
-            > old_summary["mutation_coverage"]
-        )
-        if not (boundary_improved or mutation_improved):
-            return "rejected", "level 3 requires boundary or mutation coverage improvement"
+
+    required_checks = metric_checks_for_repair(diagnosis, repair_plan, old_summary)
+    failed_checks = [
+        check_name
+        for check_name, passed in required_checks.items()
+        if not metric_check_passed(check_name, old_summary, candidate_summary)
+    ]
+    if failed_checks:
+        return "rejected", "metric-specific repair checks failed: " + ", ".join(failed_checks)
     return "accepted", None
+
+
+def metric_checks_for_repair(
+    diagnosis: dict,
+    repair_plan: dict,
+    old_summary: dict,
+) -> dict[str, bool]:
+    checks: dict[str, bool] = {}
+
+    for issue in diagnosis.get("issues", []):
+        issue_type = issue.get("issue_type")
+        if issue_type == "false_positive_assertion":
+            checks["correct_rtl_recovers"] = True
+        elif issue_type == "weak_assertion_or_missing_stimulus":
+            checks["mutation_coverage_improves"] = True
+        elif issue_type == "unreachable_or_unstimulated_assertion":
+            checks["assertion_activation_improves"] = True
+        elif issue_type == "missing_boundary_stimulus":
+            checks["boundary_case_coverage_improves"] = True
+
+    for intent in repair_plan.get("repair_intents", []):
+        intent_type = intent.get("intent_type")
+        if intent_type == "repair_false_positive_assertion":
+            checks["correct_rtl_recovers"] = True
+        elif intent_type == "expose_or_kill_mutation" or intent.get("target_mutations"):
+            checks["mutation_coverage_improves"] = True
+        elif intent_type == "activate_assertion_trigger_with_plan_and_stimulus":
+            checks["assertion_activation_improves"] = True
+        elif intent_type == "add_boundary_testplan_and_stimulus":
+            checks["boundary_case_coverage_improves"] = True
+
+    if not checks and old_summary["score"] < 1.0:
+        checks["score_improves"] = True
+    return checks
+
+
+def metric_check_passed(check_name: str, old_summary: dict, candidate_summary: dict) -> bool:
+    if check_name == "correct_rtl_recovers":
+        old_pass = all(case["correct"]["assertion_pass"] for case in old_summary["cases"])
+        new_pass = all(case["correct"]["assertion_pass"] for case in candidate_summary["cases"])
+        return new_pass and (not old_pass or new_pass)
+    if check_name == "mutation_coverage_improves":
+        return candidate_summary["mutation_coverage"] > old_summary["mutation_coverage"]
+    if check_name == "assertion_activation_improves":
+        return (
+            candidate_summary["assertion_activation_rate"]
+            > old_summary["assertion_activation_rate"]
+        )
+    if check_name == "boundary_case_coverage_improves":
+        return candidate_summary["boundary_case_coverage"] > old_summary["boundary_case_coverage"]
+    if check_name == "score_improves":
+        return candidate_summary["score"] > old_summary["score"]
+    raise ValueError(f"Unknown acceptance check: {check_name}")
 
 
 def main() -> int:
@@ -400,7 +453,7 @@ def main() -> int:
         diagnosis_result = diagnose_feedback_tool(
             feedback_path=feedback_json,
             summary_path=Path(closure_result.artifacts["summary_json"]),
-            failure_log=None,
+            failure_log=args.failure_log,
             case=args.case,
             datasets_dir=active_datasets_dir,
             out_path=diagnosis_path,
@@ -414,6 +467,7 @@ def main() -> int:
             datasets_dir=active_datasets_dir,
             out_path=repair_intent_path,
             case=args.case,
+            failure_log=args.failure_log,
         )
         repair_plan = repair_plan_result.output
         actions = choose_repair_actions(
@@ -434,9 +488,19 @@ def main() -> int:
             "closed": score >= args.target_score and summary["closed"],
             "summary_json": closure_result.artifacts["summary_json"],
             "feedback_json": str(feedback_json),
+            "failure_log": str(args.failure_log) if args.failure_log else None,
             "diagnosis_json": str(diagnosis_path),
             "repair_intent_json": str(repair_intent_path),
             "repair_intents": repair_plan["repair_intents"],
+            "repair_stages": {
+                "closure": closure_result.artifacts["summary_json"],
+                "feedback": str(feedback_json),
+                "diagnosis": str(diagnosis_path),
+                "repair_intent": str(repair_intent_path),
+                "candidate_repairs": {},
+                "candidate_verification": None,
+                "acceptance": None,
+            },
             "recommended_actions": parsed_feedback["recommended_actions"],
             "chosen_actions": actions,
             "repair_artifacts": {},
@@ -455,7 +519,7 @@ def main() -> int:
         if "repair_testplan" in actions:
             repair_path = iter_dir / "repair_testplan_plan.json"
             repair_result = repair_testplan(
-                diagnosis_path=diagnosis_path,
+                diagnosis_path=repair_intent_path,
                 out_path=repair_path,
                 llm_command=args.llm_command,
                 case=args.case,
@@ -463,6 +527,9 @@ def main() -> int:
                 allow_plan=args.allow_repair_plan,
             )
             iteration_record["repair_artifacts"]["repair_testplan_plan"] = (
+                repair_result.artifacts.get("repair_testplan_plan")
+            )
+            iteration_record["repair_stages"]["candidate_repairs"]["revised_testplan"] = (
                 repair_result.artifacts.get("repair_testplan_plan")
             )
 
@@ -480,6 +547,9 @@ def main() -> int:
             iteration_record["repair_artifacts"]["repair_sva_plan"] = repair_result.artifacts.get(
                 "repair_sva_plan"
             )
+            iteration_record["repair_stages"]["candidate_repairs"]["revised_sva"] = (
+                repair_result.artifacts.get("repair_sva_plan")
+            )
 
         if "repair_testbench" in actions:
             repair_path = iter_dir / "repair_testbench_plan.json"
@@ -493,6 +563,9 @@ def main() -> int:
                 allow_plan=args.allow_repair_plan,
             )
             iteration_record["repair_artifacts"]["repair_testbench_plan"] = (
+                repair_result.artifacts.get("repair_testbench_plan")
+            )
+            iteration_record["repair_stages"]["candidate_repairs"]["revised_tb"] = (
                 repair_result.artifacts.get("repair_testbench_plan")
             )
 
@@ -510,6 +583,9 @@ def main() -> int:
                 },
             )
             iteration_record["repair_artifacts"]["basic_testbench_repair"] = str(
+                basic_repair_path
+            )
+            iteration_record["repair_stages"]["candidate_repairs"]["revised_tb"] = str(
                 basic_repair_path
             )
 
@@ -546,8 +622,10 @@ def main() -> int:
             decision, reject_reason = candidate_acceptance_decision(
                 summary,
                 candidate_summary,
-                args.curriculum_level,
+                diagnosis,
+                repair_plan,
             )
+            acceptance_checks = metric_checks_for_repair(diagnosis, repair_plan, summary)
             iteration_record["candidate"] = {
                 "repair_json": [str(path) for path in structured_repairs],
                 "applied_patch": applied_patch_paths,
@@ -557,6 +635,18 @@ def main() -> int:
                 "new_score": candidate_summary["score"],
                 "decision": decision,
                 "reject_reason": reject_reason,
+                "acceptance_checks": {
+                    check_name: metric_check_passed(check_name, summary, candidate_summary)
+                    for check_name in acceptance_checks
+                },
+            }
+            iteration_record["repair_stages"]["candidate_verification"] = (
+                candidate_closure.artifacts["summary_json"]
+            )
+            iteration_record["repair_stages"]["acceptance"] = {
+                "decision": decision,
+                "reject_reason": reject_reason,
+                "checks": iteration_record["candidate"]["acceptance_checks"],
             }
             if decision == "accepted":
                 active_datasets_dir = candidate_root

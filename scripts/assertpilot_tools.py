@@ -1174,6 +1174,7 @@ def plan_repair_tool(
     datasets_dir: Path,
     out_path: Path | None,
     case: str | None = None,
+    failure_log: Path | None = None,
 ) -> ToolResult:
     feedback = json.loads(feedback_path.read_text(encoding="utf-8"))
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -1182,7 +1183,8 @@ def plan_repair_tool(
         if trajectory_path and trajectory_path.exists()
         else {}
     )
-    diagnosis = diagnose_feedback(feedback, summary, datasets_dir, case, [])
+    failure_issues = parse_failure_log(failure_log, None, case)
+    diagnosis = diagnose_feedback(feedback, summary, datasets_dir, case, failure_issues)
     repair_intents = plan_repair_intents(diagnosis, trajectory)
     output = {
         "diagnosis": diagnosis,
@@ -1522,6 +1524,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan_repair.add_argument("--feedback-json", type=Path, required=True)
     plan_repair.add_argument("--summary-json", type=Path, required=True)
     plan_repair.add_argument("--trajectory-json", type=Path)
+    plan_repair.add_argument("--failure-log", type=Path)
     plan_repair.add_argument("--datasets-dir", type=Path, default=DEFAULT_DATASETS_DIR)
     plan_repair.add_argument("--case")
     plan_repair.add_argument("--out", type=Path)
@@ -1634,6 +1637,7 @@ def main() -> int:
                 args.datasets_dir,
                 args.out,
                 args.case,
+                args.failure_log,
             )
         elif args.command == "repair-testplan":
             result = repair_testplan(
