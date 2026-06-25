@@ -232,29 +232,28 @@ Run one agent iteration for `fifo`:
 
 Observed baseline over all four datasets:
 
-```text
-score: 67.77%
-required_coverage: 100.00%
-bonus_coverage: 0.00%
-mutation_coverage: 75.00%
-scenario_coverage: 45.09%
-assertion_activation_rate: 74.17%
-boundary_case_coverage: 16.25%
-```
+| Metric | Baseline Closure |
+| --- | ---: |
+| Weighted score | 67.77% |
+| Required coverage | 100.00% |
+| Bonus coverage | 0.00% |
+| Mutation coverage | 75.00% |
+| Scenario coverage | 45.09% |
+| Assertion activation rate | 74.17% |
+| Boundary case coverage | 16.25% |
 
 Observed `fifo` improvement after the testbench-anchor agent repair:
 
-```text
-old_score: 67.12%
-new_score: 81.50%
-decision: accepted
-mutation_coverage: 75.00% -> 100.00%
-scenario_coverage: 37.50% -> 50.00%
-assertion_activation_rate: 80.00% -> 100.00%
-boundary_case_coverage: 20.00% -> 40.00%
-bonus_coverage: 0.00% -> 20.00%
-required_coverage: 100.00% -> 100.00%
-```
+| Metric | Before Agent Repair | After Candidate Repair | Change |
+| --- | ---: | ---: | ---: |
+| Weighted score | 67.12% | 81.50% | +14.38% |
+| Required coverage | 100.00% | 100.00% | 0.00% |
+| Bonus coverage | 0.00% | 20.00% | +20.00% |
+| Mutation coverage | 75.00% | 100.00% | +25.00% |
+| Scenario coverage | 37.50% | 50.00% | +12.50% |
+| Assertion activation rate | 80.00% | 100.00% | +20.00% |
+| Boundary case coverage | 20.00% | 40.00% | +20.00% |
+| Candidate decision | rejected/none | accepted | improved |
 
 The accepted candidate lives under:
 
