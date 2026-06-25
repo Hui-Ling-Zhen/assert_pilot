@@ -18,52 +18,201 @@
     {
       "id": "handshake_reset",
       "difficulty": "required",
-      "intent": "Exercise required scenario 'handshake_reset' and bind any marker to observed DUT state."
+      "intent": "Exercise required scenario 'handshake_reset' and bind any marker to observed DUT state.",
+      "obligation_type": "reset",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "valid_i",
+          "ready_i",
+          "data_i",
+          "ready_o",
+          "valid_o",
+          "data_o"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "handshake_reset",
+      "activation_condition": "rst",
+      "expected_behavior": "state and visible outputs take their reset values",
+      "forbidden_behavior": "state remains non-reset while reset is asserted",
+      "timing_model": "reset_cycle",
+      "categories": [
+        "required"
+      ]
     },
     {
       "id": "handshake_accept_input",
       "difficulty": "required",
-      "intent": "Exercise required scenario 'handshake_accept_input' and bind any marker to observed DUT state."
+      "intent": "Exercise required scenario 'handshake_accept_input' and bind any marker to observed DUT state.",
+      "obligation_type": "handshake_protocol",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "valid_i",
+          "ready_i",
+          "data_i",
+          "ready_o",
+          "valid_o",
+          "data_o"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "handshake_accept_input",
+      "activation_condition": "SCENARIO:handshake_accept_input",
+      "expected_behavior": "observed DUT state matches the specified scenario behavior",
+      "forbidden_behavior": "the design violates the scenario's expected behavior",
+      "timing_model": "registered_next_cycle",
+      "categories": [
+        "required"
+      ]
     },
     {
       "id": "handshake_hold_when_stalled",
       "difficulty": "required",
-      "intent": "Exercise required scenario 'handshake_hold_when_stalled' and bind any marker to observed DUT state."
+      "intent": "Exercise required scenario 'handshake_hold_when_stalled' and bind any marker to observed DUT state.",
+      "obligation_type": "stability_hold",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "valid_i",
+          "ready_i",
+          "data_i",
+          "ready_o",
+          "valid_o",
+          "data_o"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "handshake_hold_when_stalled",
+      "activation_condition": "valid_o && !ready_i",
+      "expected_behavior": "state and output data remain stable while held",
+      "forbidden_behavior": "valid or data changes while the transfer is stalled",
+      "timing_model": "registered_next_cycle",
+      "categories": [
+        "required"
+      ]
     },
     {
       "id": "handshake_back_to_back",
       "difficulty": "bonus",
-      "intent": "Exercise harder scenario 'handshake_back_to_back' after required behavior is stable."
+      "intent": "Exercise harder scenario 'handshake_back_to_back' after required behavior is stable.",
+      "obligation_type": "handshake_protocol",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "valid_i",
+          "ready_i",
+          "data_i",
+          "ready_o",
+          "valid_o",
+          "data_o"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "handshake_back_to_back",
+      "activation_condition": "SCENARIO:handshake_back_to_back",
+      "expected_behavior": "observed DUT state matches the specified scenario behavior",
+      "forbidden_behavior": "the design violates the scenario's expected behavior",
+      "timing_model": "registered_next_cycle",
+      "categories": [
+        "bonus"
+      ]
     },
     {
       "id": "handshake_ready_toggles",
-      "difficulty": "bonus",
-      "intent": "Exercise harder scenario 'handshake_ready_toggles' after required behavior is stable."
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'handshake_ready_toggles' and check relevant assertion activation.",
+      "obligation_type": "handshake_protocol",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "valid_i",
+          "ready_i",
+          "data_i",
+          "ready_o",
+          "valid_o",
+          "data_o"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "handshake_ready_toggles",
+      "activation_condition": "SCENARIO:handshake_ready_toggles",
+      "expected_behavior": "observed DUT state matches the specified scenario behavior",
+      "forbidden_behavior": "the design violates the scenario's expected behavior",
+      "timing_model": "registered_next_cycle",
+      "categories": [
+        "bonus",
+        "boundary"
+      ]
     },
     {
       "id": "handshake_stall_then_accept",
-      "difficulty": "bonus",
-      "intent": "Exercise harder scenario 'handshake_stall_then_accept' after required behavior is stable."
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'handshake_stall_then_accept' and check relevant assertion activation.",
+      "obligation_type": "stability_hold",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "valid_i",
+          "ready_i",
+          "data_i",
+          "ready_o",
+          "valid_o",
+          "data_o"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "handshake_stall_then_accept",
+      "activation_condition": "valid_o && !ready_i",
+      "expected_behavior": "state and output data remain stable while held",
+      "forbidden_behavior": "valid or data changes while the transfer is stalled",
+      "timing_model": "registered_next_cycle",
+      "categories": [
+        "bonus",
+        "boundary"
+      ]
     },
     {
       "id": "handshake_data_changes_under_stall",
-      "difficulty": "bonus",
-      "intent": "Exercise harder scenario 'handshake_data_changes_under_stall' after required behavior is stable."
-    },
-    {
-      "id": "handshake_ready_toggles",
       "difficulty": "boundary",
-      "intent": "Drive edge condition 'handshake_ready_toggles' and check relevant assertion activation."
-    },
-    {
-      "id": "handshake_stall_then_accept",
-      "difficulty": "boundary",
-      "intent": "Drive edge condition 'handshake_stall_then_accept' and check relevant assertion activation."
-    },
-    {
-      "id": "handshake_data_changes_under_stall",
-      "difficulty": "boundary",
-      "intent": "Drive edge condition 'handshake_data_changes_under_stall' and check relevant assertion activation."
+      "intent": "Drive edge condition 'handshake_data_changes_under_stall' and check relevant assertion activation.",
+      "obligation_type": "stability_hold",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "valid_i",
+          "ready_i",
+          "data_i",
+          "ready_o",
+          "valid_o",
+          "data_o"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "handshake_data_changes_under_stall",
+      "activation_condition": "valid_o && !ready_i",
+      "expected_behavior": "state and output data remain stable while held",
+      "forbidden_behavior": "valid or data changes while the transfer is stalled",
+      "timing_model": "registered_next_cycle",
+      "categories": [
+        "bonus",
+        "boundary"
+      ]
     }
   ],
   "assertion_triggers": {

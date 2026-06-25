@@ -201,6 +201,82 @@ def read_json_if_exists(path: str | Path | None) -> dict | None:
     return json.loads(json_path.read_text(encoding="utf-8"))
 
 
+def build_obligation_assertion_trace(
+    testplan: dict,
+    generated_sva: dict,
+    diagnosis: dict | None = None,
+    repair_plan: dict | None = None,
+) -> list[dict]:
+    assertions_by_plan: dict[str, list[dict]] = {}
+    for assertion in generated_sva.get("assertions", []):
+        assertions_by_plan.setdefault(str(assertion.get("plan_id")), []).append(assertion)
+
+    issues_by_scenario: dict[str, list[dict]] = {}
+    for issue in (diagnosis or {}).get("issues", []):
+        scenario = issue.get("related_scenario") or issue.get("target")
+        if scenario:
+            issues_by_scenario.setdefault(str(scenario), []).append(
+                {
+                    "issue_type": issue.get("issue_type"),
+                    "target": issue.get("target"),
+                    "related_assertion": issue.get("related_assertion"),
+                    "severity": issue.get("severity"),
+                }
+            )
+
+    intents_by_scenario: dict[str, list[dict]] = {}
+    for intent in (repair_plan or {}).get("repair_intents", []):
+        scenario = (
+            intent.get("target_scenario")
+            or intent.get("target_mutation")
+            or intent.get("target_assertion")
+        )
+        if scenario:
+            intents_by_scenario.setdefault(str(scenario), []).append(
+                {
+                    "intent_type": intent.get("intent_type"),
+                    "repair_order": intent.get("repair_order", []),
+                    "required_metric_improvement": intent.get("required_metric_improvement"),
+                }
+            )
+
+    trace = []
+    for plan in testplan.get("plans", []):
+        plan_id = str(plan.get("id"))
+        plan_assertions = assertions_by_plan.get(plan_id, [])
+        trigger = plan.get("trigger_scenario")
+        trace.append(
+            {
+                "plan_id": plan_id,
+                "obligation_type": plan.get("obligation_type"),
+                "scope_signals": plan.get("scope", {}).get("signals", []),
+                "trigger_scenario": trigger,
+                "activation_condition": plan.get("activation_condition"),
+                "expected_behavior": plan.get("expected_behavior"),
+                "forbidden_behavior": plan.get("forbidden_behavior"),
+                "timing_model": plan.get("timing_model"),
+                "assertions": [
+                    {
+                        "name": assertion.get("name"),
+                        "status": assertion.get("status"),
+                        "trigger_scenario": assertion.get("trigger_scenario"),
+                        "activation_condition": assertion.get("activation_condition"),
+                        "timing_rationale": assertion.get("timing_rationale"),
+                    }
+                    for assertion in plan_assertions
+                ],
+                "needs_stimulus": [
+                    item
+                    for item in generated_sva.get("needs_stimulus", [])
+                    if str(item.get("plan_id")) == plan_id
+                ],
+                "diagnosis_issues": issues_by_scenario.get(str(trigger), []),
+                "repair_intents": intents_by_scenario.get(str(trigger), []),
+            }
+        )
+    return trace
+
+
 def load_curriculum(datasets_dir: Path, level: int) -> dict:
     curriculum_path = datasets_dir / "curriculum_levels.json"
     if not curriculum_path.exists():
@@ -517,6 +593,10 @@ def main() -> int:
         allow_scaffold=args.allow_scaffold,
     )
     trajectory["generated_sva"] = sva_result.output
+    trajectory["obligation_assertion_triggers"] = build_obligation_assertion_trace(
+        trajectory["testplan"],
+        trajectory["generated_sva"],
+    )
 
     for iteration in range(args.max_iters):
         iter_dir = args.run_root / f"iter_{iteration}"
@@ -579,6 +659,12 @@ def main() -> int:
             "repair_intent_json": str(repair_intent_path),
             "repair_intent": repair_plan,
             "repair_intents": repair_plan["repair_intents"],
+            "obligation_assertion_triggers": build_obligation_assertion_trace(
+                trajectory["testplan"],
+                trajectory["generated_sva"],
+                diagnosis,
+                repair_plan,
+            ),
             "generated_testplan_patch": None,
             "generated_sva_patch": None,
             "generated_tb_patch": None,

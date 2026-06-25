@@ -15,52 +15,156 @@
     {
       "id": "counter_reset",
       "difficulty": "required",
-      "intent": "Exercise required scenario 'counter_reset' and bind any marker to observed DUT state."
+      "intent": "Exercise required scenario 'counter_reset' and bind any marker to observed DUT state.",
+      "obligation_type": "reset",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "en",
+          "count",
+          "wrap"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "counter_reset",
+      "activation_condition": "rst",
+      "expected_behavior": "state and visible outputs take their reset values",
+      "forbidden_behavior": "state remains non-reset while reset is asserted",
+      "timing_model": "reset_cycle",
+      "categories": [
+        "required"
+      ]
     },
     {
       "id": "counter_enabled_counting",
       "difficulty": "required",
-      "intent": "Exercise required scenario 'counter_enabled_counting' and bind any marker to observed DUT state."
+      "intent": "Exercise required scenario 'counter_enabled_counting' and bind any marker to observed DUT state.",
+      "obligation_type": "state_transition",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "en",
+          "count",
+          "wrap"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "counter_enabled_counting",
+      "activation_condition": "SCENARIO:counter_enabled_counting",
+      "expected_behavior": "observed DUT state matches the specified scenario behavior",
+      "forbidden_behavior": "the design violates the scenario's expected behavior",
+      "timing_model": "registered_next_cycle",
+      "categories": [
+        "required"
+      ]
     },
     {
       "id": "counter_wrap_at_max",
-      "difficulty": "required",
-      "intent": "Exercise required scenario 'counter_wrap_at_max' and bind any marker to observed DUT state."
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'counter_wrap_at_max' and check relevant assertion activation.",
+      "obligation_type": "boundary_wrap",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "en",
+          "count",
+          "wrap"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "counter_wrap_at_max",
+      "activation_condition": "en && count == MAX_COUNT",
+      "expected_behavior": "pointer or counter wraps according to the RTL boundary behavior",
+      "forbidden_behavior": "the design violates the scenario's expected behavior",
+      "timing_model": "registered_next_cycle",
+      "categories": [
+        "required",
+        "boundary"
+      ]
     },
     {
       "id": "counter_disabled_hold",
-      "difficulty": "bonus",
-      "intent": "Exercise harder scenario 'counter_disabled_hold' after required behavior is stable."
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'counter_disabled_hold' and check relevant assertion activation.",
+      "obligation_type": "stability_hold",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "en",
+          "count",
+          "wrap"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "counter_disabled_hold",
+      "activation_condition": "!en",
+      "expected_behavior": "state and output data remain stable while held",
+      "forbidden_behavior": "count changes while enable is low",
+      "timing_model": "registered_next_cycle",
+      "categories": [
+        "bonus",
+        "boundary"
+      ]
     },
     {
       "id": "counter_reset_mid_count",
-      "difficulty": "bonus",
-      "intent": "Exercise harder scenario 'counter_reset_mid_count' after required behavior is stable."
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'counter_reset_mid_count' and check relevant assertion activation.",
+      "obligation_type": "reset",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "en",
+          "count",
+          "wrap"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "counter_reset_mid_count",
+      "activation_condition": "rst",
+      "expected_behavior": "state and visible outputs take their reset values",
+      "forbidden_behavior": "state remains non-reset while reset is asserted",
+      "timing_model": "reset_cycle",
+      "categories": [
+        "bonus",
+        "boundary"
+      ]
     },
     {
       "id": "counter_wrap_after_disable",
-      "difficulty": "bonus",
-      "intent": "Exercise harder scenario 'counter_wrap_after_disable' after required behavior is stable."
-    },
-    {
-      "id": "counter_wrap_at_max",
       "difficulty": "boundary",
-      "intent": "Drive edge condition 'counter_wrap_at_max' and check relevant assertion activation."
-    },
-    {
-      "id": "counter_disabled_hold",
-      "difficulty": "boundary",
-      "intent": "Drive edge condition 'counter_disabled_hold' and check relevant assertion activation."
-    },
-    {
-      "id": "counter_reset_mid_count",
-      "difficulty": "boundary",
-      "intent": "Drive edge condition 'counter_reset_mid_count' and check relevant assertion activation."
-    },
-    {
-      "id": "counter_wrap_after_disable",
-      "difficulty": "boundary",
-      "intent": "Drive edge condition 'counter_wrap_after_disable' and check relevant assertion activation."
+      "intent": "Drive edge condition 'counter_wrap_after_disable' and check relevant assertion activation.",
+      "obligation_type": "boundary_wrap",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "en",
+          "count",
+          "wrap"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "counter_wrap_after_disable",
+      "activation_condition": "en && count == MAX_COUNT",
+      "expected_behavior": "pointer or counter wraps according to the RTL boundary behavior",
+      "forbidden_behavior": "the design violates the scenario's expected behavior",
+      "timing_model": "registered_next_cycle",
+      "categories": [
+        "bonus",
+        "boundary"
+      ]
     }
   ],
   "assertion_triggers": {

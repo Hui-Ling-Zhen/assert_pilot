@@ -19,67 +19,239 @@
     {
       "id": "fifo_reset_empty",
       "difficulty": "required",
-      "intent": "Exercise required scenario 'fifo_reset_empty' and bind any marker to observed DUT state."
+      "intent": "Exercise required scenario 'fifo_reset_empty' and bind any marker to observed DUT state.",
+      "obligation_type": "reset",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "wr_en",
+          "rd_en",
+          "wdata",
+          "rdata",
+          "full",
+          "empty",
+          "count"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "fifo_reset_empty",
+      "activation_condition": "rst",
+      "expected_behavior": "state and visible outputs take their reset values",
+      "forbidden_behavior": "state remains non-reset while reset is asserted",
+      "timing_model": "reset_cycle",
+      "categories": [
+        "required"
+      ]
     },
     {
       "id": "fifo_fill_to_full",
       "difficulty": "required",
-      "intent": "Exercise required scenario 'fifo_fill_to_full' and bind any marker to observed DUT state."
+      "intent": "Exercise required scenario 'fifo_fill_to_full' and bind any marker to observed DUT state.",
+      "obligation_type": "state_transition",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "wr_en",
+          "rd_en",
+          "wdata",
+          "rdata",
+          "full",
+          "empty",
+          "count"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "fifo_fill_to_full",
+      "activation_condition": "SCENARIO:fifo_fill_to_full",
+      "expected_behavior": "observed DUT state matches the specified scenario behavior",
+      "forbidden_behavior": "the design violates the scenario's expected behavior",
+      "timing_model": "same_or_next_cycle_from_rtl",
+      "categories": [
+        "required"
+      ]
     },
     {
       "id": "fifo_write_while_full",
-      "difficulty": "required",
-      "intent": "Exercise required scenario 'fifo_write_while_full' and bind any marker to observed DUT state."
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'fifo_write_while_full' and check relevant assertion activation.",
+      "obligation_type": "boundary_overflow",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "wr_en",
+          "rd_en",
+          "wdata",
+          "rdata",
+          "full",
+          "empty",
+          "count"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "fifo_write_while_full",
+      "activation_condition": "full && wr_en",
+      "expected_behavior": "full remains asserted and count does not increment beyond depth",
+      "forbidden_behavior": "count increases beyond depth or full deasserts on a full write",
+      "timing_model": "same_or_next_cycle_from_rtl",
+      "categories": [
+        "required",
+        "boundary"
+      ]
     },
     {
       "id": "fifo_read_from_empty",
-      "difficulty": "bonus",
-      "intent": "Exercise harder scenario 'fifo_read_from_empty' after required behavior is stable."
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'fifo_read_from_empty' and check relevant assertion activation.",
+      "obligation_type": "boundary_underflow",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "wr_en",
+          "rd_en",
+          "wdata",
+          "rdata",
+          "full",
+          "empty",
+          "count"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "fifo_read_from_empty",
+      "activation_condition": "empty && rd_en",
+      "expected_behavior": "empty remains asserted and count does not decrement",
+      "forbidden_behavior": "count decreases or empty deasserts on an empty read",
+      "timing_model": "same_or_next_cycle_from_rtl",
+      "categories": [
+        "bonus",
+        "boundary"
+      ]
     },
     {
       "id": "fifo_simultaneous_read_write",
       "difficulty": "bonus",
-      "intent": "Exercise harder scenario 'fifo_simultaneous_read_write' after required behavior is stable."
+      "intent": "Exercise harder scenario 'fifo_simultaneous_read_write' after required behavior is stable.",
+      "obligation_type": "state_transition",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "wr_en",
+          "rd_en",
+          "wdata",
+          "rdata",
+          "full",
+          "empty",
+          "count"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "fifo_simultaneous_read_write",
+      "activation_condition": "SCENARIO:fifo_simultaneous_read_write",
+      "expected_behavior": "observed DUT state matches the specified scenario behavior",
+      "forbidden_behavior": "the design violates the scenario's expected behavior",
+      "timing_model": "same_or_next_cycle_from_rtl",
+      "categories": [
+        "bonus"
+      ]
     },
     {
       "id": "fifo_wrap_write_pointer",
-      "difficulty": "bonus",
-      "intent": "Exercise harder scenario 'fifo_wrap_write_pointer' after required behavior is stable."
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'fifo_wrap_write_pointer' and check relevant assertion activation.",
+      "obligation_type": "boundary_wrap",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "wr_en",
+          "rd_en",
+          "wdata",
+          "rdata",
+          "full",
+          "empty",
+          "count"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "fifo_wrap_write_pointer",
+      "activation_condition": "SCENARIO:fifo_wrap_write_pointer",
+      "expected_behavior": "pointer or counter wraps according to the RTL boundary behavior",
+      "forbidden_behavior": "the design violates the scenario's expected behavior",
+      "timing_model": "same_or_next_cycle_from_rtl",
+      "categories": [
+        "bonus",
+        "boundary"
+      ]
     },
     {
       "id": "fifo_wrap_read_pointer",
-      "difficulty": "bonus",
-      "intent": "Exercise harder scenario 'fifo_wrap_read_pointer' after required behavior is stable."
+      "difficulty": "boundary",
+      "intent": "Drive edge condition 'fifo_wrap_read_pointer' and check relevant assertion activation.",
+      "obligation_type": "boundary_wrap",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "wr_en",
+          "rd_en",
+          "wdata",
+          "rdata",
+          "full",
+          "empty",
+          "count"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "fifo_wrap_read_pointer",
+      "activation_condition": "SCENARIO:fifo_wrap_read_pointer",
+      "expected_behavior": "pointer or counter wraps according to the RTL boundary behavior",
+      "forbidden_behavior": "the design violates the scenario's expected behavior",
+      "timing_model": "same_or_next_cycle_from_rtl",
+      "categories": [
+        "bonus",
+        "boundary"
+      ]
     },
     {
       "id": "fifo_full_then_read_then_write",
-      "difficulty": "bonus",
-      "intent": "Exercise harder scenario 'fifo_full_then_read_then_write' after required behavior is stable."
-    },
-    {
-      "id": "fifo_read_from_empty",
       "difficulty": "boundary",
-      "intent": "Drive edge condition 'fifo_read_from_empty' and check relevant assertion activation."
-    },
-    {
-      "id": "fifo_write_while_full",
-      "difficulty": "boundary",
-      "intent": "Drive edge condition 'fifo_write_while_full' and check relevant assertion activation."
-    },
-    {
-      "id": "fifo_wrap_write_pointer",
-      "difficulty": "boundary",
-      "intent": "Drive edge condition 'fifo_wrap_write_pointer' and check relevant assertion activation."
-    },
-    {
-      "id": "fifo_wrap_read_pointer",
-      "difficulty": "boundary",
-      "intent": "Drive edge condition 'fifo_wrap_read_pointer' and check relevant assertion activation."
-    },
-    {
-      "id": "fifo_full_then_read_then_write",
-      "difficulty": "boundary",
-      "intent": "Drive edge condition 'fifo_full_then_read_then_write' and check relevant assertion activation."
+      "intent": "Drive edge condition 'fifo_full_then_read_then_write' and check relevant assertion activation.",
+      "obligation_type": "state_transition",
+      "scope": {
+        "signals": [
+          "clk",
+          "rst",
+          "wr_en",
+          "rd_en",
+          "wdata",
+          "rdata",
+          "full",
+          "empty",
+          "count"
+        ],
+        "clock": "clk",
+        "reset": "rst"
+      },
+      "trigger_scenario": "fifo_full_then_read_then_write",
+      "activation_condition": "SCENARIO:fifo_full_then_read_then_write",
+      "expected_behavior": "observed DUT state matches the specified scenario behavior",
+      "forbidden_behavior": "the design violates the scenario's expected behavior",
+      "timing_model": "same_or_next_cycle_from_rtl",
+      "categories": [
+        "bonus",
+        "boundary"
+      ]
     }
   ],
   "assertion_triggers": {

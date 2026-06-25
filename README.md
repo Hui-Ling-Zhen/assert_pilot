@@ -138,10 +138,53 @@ ASSERTPILOT_LLM_PROMPT_JSON
 ASSERTPILOT_LLM_TASK
 ```
 
-and must print JSON to stdout. For `generate-sva`, return:
+and must print JSON to stdout. `generate-sva` is guided by:
+
+```text
+skills/sva_generation_skill.md
+```
+
+The skill defines obligation extraction, reset/`disable iff` rules, `$past` timing alignment, stability patterns, boundary checks, and vacuity avoidance. `generate-testplan` emits assertion contracts rather than loose natural-language plans:
 
 ```json
-{"assertions": [{"name": "assert_example", "plan_id": "fifo_reset_empty", "sva": "..."}]}
+{
+  "id": "fifo_read_from_empty",
+  "obligation_type": "boundary_underflow",
+  "scope": {
+    "signals": ["clk", "rst", "rd_en", "empty", "count"],
+    "clock": "clk",
+    "reset": "rst"
+  },
+  "trigger_scenario": "fifo_read_from_empty",
+  "activation_condition": "empty && rd_en",
+  "expected_behavior": "empty remains asserted and count does not decrement",
+  "forbidden_behavior": "count decreases or empty deasserts on an empty read",
+  "timing_model": "same_or_next_cycle_from_rtl"
+}
+```
+
+For `generate-sva`, return assertion metadata with a trigger scenario, activation condition, and timing rationale. If a non-vacuous assertion cannot be written because the trigger lacks stimulus, return `needs_stimulus` instead of inventing an assertion:
+
+```json
+{
+  "assertions": [
+    {
+      "name": "assert_no_underflow",
+      "plan_id": "fifo_read_from_empty",
+      "trigger_scenario": "fifo_read_from_empty",
+      "activation_condition": "empty && rd_en",
+      "timing_rationale": "The underflow condition is sampled on the clock edge and the FIFO state is checked on the following cycle.",
+      "sva": "property no_underflow; ... endproperty\nassert_no_underflow: assert property(no_underflow);"
+    }
+  ],
+  "needs_stimulus": [
+    {
+      "plan_id": "fifo_read_from_empty",
+      "trigger_scenario": "fifo_read_from_empty",
+      "reason": "No current stimulus reaches empty && rd_en."
+    }
+  ]
+}
 ```
 
 For `repair-sva`, return:
@@ -281,6 +324,21 @@ Each iteration also embeds a self-evolution sample directly in `trajectory.json`
 {
   "diagnosis": {"issues": []},
   "repair_intent": {"repair_intents": []},
+  "obligation_assertion_triggers": [
+    {
+      "plan_id": "fifo_read_from_empty",
+      "obligation_type": "boundary_underflow",
+      "trigger_scenario": "fifo_read_from_empty",
+      "activation_condition": "empty && rd_en",
+      "assertions": [
+        {
+          "name": "assert_agent_fifo_read_from_empty",
+          "trigger_scenario": "fifo_read_from_empty",
+          "activation_condition": "empty && rd_en"
+        }
+      ]
+    }
+  ],
   "generated_testplan_patch": {"mode": "plan_fallback", "proposals": []},
   "generated_sva_patch": {"mode": "plan_fallback", "proposals": []},
   "generated_tb_patch": {"mode": "basic_testbench_anchor", "repairs": []},
@@ -364,7 +422,7 @@ Run the baseline:
 ```bash
 ./scripts/run_coverage_closure.py \
   --max-iters 1 \
-  --build-root runs/agent_tools/curriculum_compare/baseline
+  --build-root runs/agent_tools/current_dataset_results/baseline
 ```
 
 Run one Level 3 agent iteration for each case:
@@ -413,13 +471,13 @@ Observed Level 3 single-iteration results after three-stage repair planning:
 The most recent experiment artifacts live under:
 
 ```text
-runs/agent_tools/curriculum_compare/<case>/trajectory.json
+runs/agent_tools/current_dataset_results/<case>/trajectory.json
 ```
 
 The scheduler output for the next curriculum step lives under:
 
 ```text
-runs/agent_tools/curriculum_compare/next_task.json
+runs/agent_tools/current_dataset_results/next_task.json
 ```
 
 It selects `arbiter` Level 4 `Mutation Killing` focused on `bug_grant_without_request`, because the boundary repair improved coverage but did not improve mutation coverage.

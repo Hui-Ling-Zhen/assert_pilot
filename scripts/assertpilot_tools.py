@@ -27,6 +27,7 @@ DEFAULT_DATASETS_DIR = PROJECT_ROOT / "datasets"
 DEFAULT_RUNS_DIR = PROJECT_ROOT / "runs" / "agent_tools"
 DEFAULT_VERILATOR = PROJECT_ROOT.parent / "verilator" / "install" / "bin" / "verilator"
 DEFAULT_LLM_COMMAND_ENV = "ASSERTPILOT_LLM_COMMAND"
+SVA_GENERATION_SKILL = PROJECT_ROOT / "skills" / "sva_generation_skill.md"
 ALLOWED_REPAIR_FILES = {
     "rtl/property_goldmine.sva",
     "sim/tb.cpp",
@@ -160,23 +161,188 @@ def call_llm_json(
         ) from exc
 
 
-def extract_assertions_from_llm_response(response: dict[str, Any]) -> list[dict[str, str]]:
+def plan_lookup(testplan: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {str(plan.get("id")): plan for plan in testplan.get("plans", [])}
+
+
+def assertion_trigger_for_plan(plan_id: str, testplan: dict[str, Any]) -> str:
+    plan = plan_lookup(testplan).get(plan_id, {})
+    if plan.get("trigger_scenario"):
+        return str(plan["trigger_scenario"])
+    if plan.get("expected_scenarios"):
+        expected = plan["expected_scenarios"]
+        if isinstance(expected, list) and expected:
+            return str(expected[0])
+    triggers = testplan.get("assertion_triggers", {})
+    if plan_id in triggers:
+        trigger = triggers[plan_id]
+        if isinstance(trigger, str):
+            return trigger
+        if isinstance(trigger, list) and trigger:
+            return str(trigger[0])
+    return plan_id
+
+
+def default_activation_condition(plan_id: str, testplan: dict[str, Any]) -> str:
+    plan = plan_lookup(testplan).get(plan_id, {})
+    if plan.get("activation_condition"):
+        return str(plan["activation_condition"])
+    if plan.get("scope", {}).get("activation_condition"):
+        return str(plan["scope"]["activation_condition"])
+    return f"trigger_scenario == {assertion_trigger_for_plan(plan_id, testplan)}"
+
+
+def infer_obligation_type(scenario: str) -> str:
+    name = scenario.lower()
+    if "reset" in name:
+        return "reset"
+    if "underflow" in name or "read_from_empty" in name:
+        return "boundary_underflow"
+    if "overflow" in name or "write_while_full" in name:
+        return "boundary_overflow"
+    if "wrap" in name:
+        return "boundary_wrap"
+    if "hold" in name or "stall" in name:
+        return "stability_hold"
+    if "both_requests" in name or "one_hot" in name or "grant" in name:
+        return "mutual_exclusion_one_hot"
+    if "handshake" in name or "valid" in name or "ready" in name:
+        return "handshake_protocol"
+    return "state_transition"
+
+
+def infer_activation_condition(scenario: str) -> str:
+    name = scenario.lower()
+    if "read_from_empty" in name or "underflow" in name:
+        return "empty && rd_en"
+    if "write_while_full" in name or "overflow" in name:
+        return "full && wr_en"
+    if "disabled_hold" in name:
+        return "!en"
+    if "wrap" in name and "counter" in name:
+        return "en && count == MAX_COUNT"
+    if "no_req_idle" in name:
+        return "req == 0"
+    if "both_requests" in name:
+        return "req == 2'b11"
+    if "data_changes_under_stall" in name:
+        return "valid_o && !ready_i"
+    if "hold_when_stalled" in name or "stall" in name:
+        return "valid_o && !ready_i"
+    if "reset" in name:
+        return "rst"
+    return f"SCENARIO:{scenario}"
+
+
+def infer_expected_behavior(scenario: str) -> str:
+    name = scenario.lower()
+    if "reset" in name:
+        return "state and visible outputs take their reset values"
+    if "read_from_empty" in name or "underflow" in name:
+        return "empty remains asserted and count does not decrement"
+    if "write_while_full" in name or "overflow" in name:
+        return "full remains asserted and count does not increment beyond depth"
+    if "disabled_hold" in name or "hold" in name or "stall" in name:
+        return "state and output data remain stable while held"
+    if "both_requests" in name or "grant" in name:
+        return "grant is one-hot or zero and any grant corresponds to a request"
+    if "wrap" in name:
+        return "pointer or counter wraps according to the RTL boundary behavior"
+    return "observed DUT state matches the specified scenario behavior"
+
+
+def infer_forbidden_behavior(scenario: str) -> str:
+    name = scenario.lower()
+    if "read_from_empty" in name or "underflow" in name:
+        return "count decreases or empty deasserts on an empty read"
+    if "write_while_full" in name or "overflow" in name:
+        return "count increases beyond depth or full deasserts on a full write"
+    if "disabled_hold" in name:
+        return "count changes while enable is low"
+    if "stall" in name or "hold" in name:
+        return "valid or data changes while the transfer is stalled"
+    if "grant" in name or "both_requests" in name:
+        return "grant is not one-hot or grants a requester that was not active"
+    if "reset" in name:
+        return "state remains non-reset while reset is asserted"
+    return "the design violates the scenario's expected behavior"
+
+
+def infer_timing_model(scenario: str) -> str:
+    name = scenario.lower()
+    if "reset" in name:
+        return "reset_cycle"
+    if "arbiter" in name or "handshake" in name or "counter" in name:
+        return "registered_next_cycle"
+    return "same_or_next_cycle_from_rtl"
+
+
+def contract_for_scenario(
+    scenario: str,
+    difficulty: str,
+    intent: str,
+    valid_signals: list[str],
+    assertion_triggers: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "id": scenario,
+        "difficulty": difficulty,
+        "intent": intent,
+        "obligation_type": infer_obligation_type(scenario),
+        "scope": {
+            "signals": valid_signals,
+            "clock": "clk" if "clk" in valid_signals else None,
+            "reset": "rst" if "rst" in valid_signals else None,
+        },
+        "trigger_scenario": assertion_trigger_for_plan(
+            scenario,
+            {"plans": [], "assertion_triggers": assertion_triggers},
+        ),
+        "activation_condition": infer_activation_condition(scenario),
+        "expected_behavior": infer_expected_behavior(scenario),
+        "forbidden_behavior": infer_forbidden_behavior(scenario),
+        "timing_model": infer_timing_model(scenario),
+    }
+
+
+def extract_assertions_from_llm_response(
+    response: dict[str, Any],
+    testplan: dict[str, Any],
+) -> list[dict[str, str]]:
     assertions = response.get("assertions")
     if isinstance(assertions, list):
         normalized = []
         for index, item in enumerate(assertions):
             if isinstance(item, str):
+                plan_id = f"plan_{index}"
                 normalized.append(
-                    {"name": f"assert_agent_{index}", "plan_id": f"plan_{index}", "sva": item}
+                    {
+                        "name": f"assert_agent_{index}",
+                        "plan_id": plan_id,
+                        "trigger_scenario": assertion_trigger_for_plan(plan_id, testplan),
+                        "activation_condition": default_activation_condition(plan_id, testplan),
+                        "timing_rationale": "",
+                        "sva": item,
+                    }
                 )
             elif isinstance(item, dict):
                 sva = str(item.get("sva", "")).strip()
                 if not sva:
                     continue
+                plan_id = str(item.get("plan_id", f"plan_{index}"))
                 normalized.append(
                     {
                         "name": str(item.get("name", f"assert_agent_{index}")),
-                        "plan_id": str(item.get("plan_id", f"plan_{index}")),
+                        "plan_id": plan_id,
+                        "trigger_scenario": str(
+                            item.get("trigger_scenario")
+                            or assertion_trigger_for_plan(plan_id, testplan)
+                        ),
+                        "activation_condition": str(
+                            item.get("activation_condition")
+                            or default_activation_condition(plan_id, testplan)
+                        ),
+                        "timing_rationale": str(item.get("timing_rationale", "")),
                         "sva": sva,
                     }
                 )
@@ -189,7 +355,10 @@ def extract_assertions_from_llm_response(response: dict[str, Any]) -> list[dict[
     return [
         {
             "name": f"assert_agent_{index}",
-            "plan_id": f"plan_{index}",
+            "plan_id": (plan_id := f"plan_{index}"),
+            "trigger_scenario": assertion_trigger_for_plan(plan_id, testplan),
+            "activation_condition": default_activation_condition(plan_id, testplan),
+            "timing_rationale": "",
             "sva": block.strip(),
         }
         for index, block in enumerate(blocks)
@@ -197,19 +366,62 @@ def extract_assertions_from_llm_response(response: dict[str, Any]) -> list[dict[
     ]
 
 
+def extract_needs_stimulus_from_llm_response(
+    response: dict[str, Any],
+    testplan: dict[str, Any],
+) -> list[dict[str, str]]:
+    needs_stimulus = response.get("needs_stimulus", [])
+    if not isinstance(needs_stimulus, list):
+        return []
+    normalized = []
+    for index, item in enumerate(needs_stimulus):
+        if not isinstance(item, dict):
+            continue
+        plan_id = str(item.get("plan_id", f"plan_{index}"))
+        normalized.append(
+            {
+                "plan_id": plan_id,
+                "trigger_scenario": str(
+                    item.get("trigger_scenario")
+                    or assertion_trigger_for_plan(plan_id, testplan)
+                ),
+                "reason": str(item.get("reason", "Trigger scenario lacks stimulus.")),
+            }
+        )
+    return normalized
+
+
 def build_sva_generation_prompt(testplan: dict[str, Any], rtl_dir: Path) -> dict[str, Any]:
     design_path = rtl_dir / "design.v"
     property_path = rtl_dir / "property_goldmine.sva"
     bindings_path = rtl_dir / "bindings.sva"
+    skill_text = read_text(SVA_GENERATION_SKILL)[:12000] if SVA_GENERATION_SKILL.exists() else ""
     return {
         "task": "generate_sva",
         "instructions": [
             "Generate real SystemVerilog Assertions for the provided AssertPilot dataset.",
-            "Use only signals present in valid_signals or visible in the reference assertion module.",
-            "Prefer disable iff (rst) for non-reset properties.",
-            "Avoid vacuous properties. Make each assertion correspond to a testplan item.",
-            "Return JSON: {\"assertions\": [{\"name\": ..., \"plan_id\": ..., \"sva\": ...}]}",
+            "Follow the SVA Generation Skill exactly.",
+            "Treat each testplan item as an assertion contract, not free-form prose.",
+            "Every assertion must correspond to exactly one testplan plan_id.",
+            "Every assertion must declare trigger_scenario from the testplan item.",
+            "Every assertion must declare activation_condition from the testplan item or a stricter equivalent.",
+            "Use only signals from the plan item's scope.signals, valid_signals, or visible reference property module.",
+            "Use expected_behavior and forbidden_behavior to define the consequent.",
+            "Use timing_model to decide same-cycle, next-cycle, or $past alignment.",
+            "If $past is needed, add timing_rationale explaining the alignment.",
+            "Reset assertions that check reset behavior must not use disable iff (rst).",
+            "Non-reset temporal properties should use disable iff (rst).",
+            "Use $past(input) for registered outputs when checking next-cycle behavior.",
+            "Avoid vacuous properties: each antecedent must be reachable by trigger_scenario.",
+            "If a non-vacuous assertion cannot be written because the trigger has no stimulus, return needs_stimulus instead of inventing an assertion.",
+            (
+                "Return JSON: {\"assertions\": [{\"name\": ..., \"plan_id\": ..., "
+                "\"trigger_scenario\": ..., \"activation_condition\": ..., "
+                "\"timing_rationale\": ..., \"sva\": ...}], "
+                "\"needs_stimulus\": [{\"plan_id\": ..., \"trigger_scenario\": ..., \"reason\": ...}]}"
+            ),
         ],
+        "sva_generation_skill": skill_text,
         "testplan": testplan,
         "rtl": {
             "design_v": read_text(design_path)[:12000],
@@ -312,13 +524,20 @@ def scaffold_assertions(testplan: dict[str, Any]) -> list[dict[str, str]]:
     assertions = []
     for index, plan in enumerate(testplan.get("plans", [])):
         plan_id = plan.get("id", f"plan_{index}")
+        trigger_scenario = assertion_trigger_for_plan(str(plan_id), testplan)
+        activation_condition = default_activation_condition(str(plan_id), testplan)
         assertions.append(
             {
                 "name": f"assert_agent_{plan_id}",
                 "plan_id": plan_id,
+                "trigger_scenario": trigger_scenario,
+                "activation_condition": activation_condition,
+                "timing_rationale": str(plan.get("timing_model", "")),
                 "status": "scaffold",
                 "sva": (
                     f"// TODO(agent): implement assertion for {plan_id}\n"
+                    f"// Trigger scenario: {trigger_scenario}\n"
+                    f"// Activation condition: {activation_condition}\n"
                     f"// Intent: {plan.get('intent', '')}"
                 ),
             }
@@ -761,29 +980,48 @@ def generate_testplan(
     spec_text = read_text(spec_path)
 
     plans = []
+    plan_by_id: dict[str, dict[str, Any]] = {}
+    valid_signals = signals.get("valid_signals", [])
+    assertion_triggers = coverage.get("assertion_triggers", {})
+
+    def add_plan(scenario: str, category: str, intent: str) -> None:
+        if scenario in plan_by_id:
+            plan = plan_by_id[scenario]
+            categories = plan.setdefault("categories", [plan.get("difficulty", category)])
+            if category not in categories:
+                categories.append(category)
+            if category == "boundary":
+                plan["difficulty"] = "boundary"
+                plan["intent"] = intent
+            return
+        plan = contract_for_scenario(
+            scenario,
+            category,
+            intent,
+            valid_signals,
+            assertion_triggers,
+        )
+        plan["categories"] = [category]
+        plan_by_id[scenario] = plan
+        plans.append(plan)
+
     for scenario in coverage.get("required", []):
-        plans.append(
-            {
-                "id": scenario,
-                "difficulty": "required",
-                "intent": f"Exercise required scenario '{scenario}' and bind any marker to observed DUT state.",
-            }
+        add_plan(
+            scenario,
+            "required",
+            f"Exercise required scenario '{scenario}' and bind any marker to observed DUT state.",
         )
     for scenario in coverage.get("bonus", []):
-        plans.append(
-            {
-                "id": scenario,
-                "difficulty": "bonus",
-                "intent": f"Exercise harder scenario '{scenario}' after required behavior is stable.",
-            }
+        add_plan(
+            scenario,
+            "bonus",
+            f"Exercise harder scenario '{scenario}' after required behavior is stable.",
         )
     for scenario in coverage.get("boundary_cases", []):
-        plans.append(
-            {
-                "id": scenario,
-                "difficulty": "boundary",
-                "intent": f"Drive edge condition '{scenario}' and check relevant assertion activation.",
-            }
+        add_plan(
+            scenario,
+            "boundary",
+            f"Drive edge condition '{scenario}' and check relevant assertion activation.",
         )
 
     output = {
@@ -791,10 +1029,10 @@ def generate_testplan(
         "spec_path": str(spec_path) if spec_path else None,
         "rtl_dir": str(rtl_dir or (case_path / "rtl" if case_path else "")),
         "top_module": signals.get("top_module"),
-        "valid_signals": signals.get("valid_signals", []),
+        "valid_signals": valid_signals,
         "spec_excerpt": spec_text[:1000],
         "plans": plans,
-        "assertion_triggers": coverage.get("assertion_triggers", {}),
+        "assertion_triggers": assertion_triggers,
     }
 
     artifacts = {}
@@ -830,15 +1068,18 @@ def generate_sva(
         )
         assertions = [
             {**assertion, "status": assertion.get("status", "llm_generated")}
-            for assertion in extract_assertions_from_llm_response(llm_response)
+            for assertion in extract_assertions_from_llm_response(llm_response, testplan)
         ]
+        needs_stimulus = extract_needs_stimulus_from_llm_response(llm_response, testplan)
         if not assertions:
-            raise RuntimeError("LLM response did not contain any assertions.")
+            if not needs_stimulus:
+                raise RuntimeError("LLM response did not contain assertions or needs_stimulus.")
     except Exception:
         if not allow_scaffold:
             raise
         mode = "scaffold_fallback"
         assertions = scaffold_assertions(testplan)
+        needs_stimulus = []
 
     output = {
         "testplan": str(testplan_path),
@@ -846,6 +1087,7 @@ def generate_sva(
         "template_available": bool(template),
         "mode": mode,
         "assertions": assertions,
+        "needs_stimulus": needs_stimulus,
     }
 
     artifacts = {}
